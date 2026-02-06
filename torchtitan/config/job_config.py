@@ -783,6 +783,21 @@ class MXLinear:
 
 
 @dataclass
+class QATLinear:
+    recipe_name: str = "int4"
+    """
+    TODO: write me
+    """
+
+    filter_fqns: list[str] = field(default_factory=lambda: ["output"])
+    """
+    Comma-separated list of fully qualified names of modules to skip applying QAT to.
+    By default we always skip the output layer.
+    Example: --quantize.linear.qat.filter_fqns="attention.wq,attention.wk,attention.wv,output"
+    """
+
+
+@dataclass
 class MXGroupedMM:
     recipe_name: Literal["mxfp8"] = "mxfp8"
     """
@@ -807,6 +822,9 @@ class QuantizedLinear:
 
     mx: MXLinear = field(default_factory=MXLinear)
     """MX training config for nn.Linear layers"""
+
+    qat: QATLinear = field(default_factory=QATLinear)
+    """QAT training config for nn.Linear layers"""
 
 
 @dataclass

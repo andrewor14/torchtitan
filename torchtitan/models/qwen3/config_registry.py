@@ -362,3 +362,62 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             mode="selective",
         ),
     )
+
+
+def sft_qwen3_30b_a3b_arc() -> Trainer.Config:
+    """Qwen3-30B-A3B SFT on ARC-Challenge dataset.
+
+    Raw completion format matching lm_eval's arc_challenge eval:
+    ``Question: {question}\\nAnswer: {answer_text}``
+
+    No chat template — trains on raw text to match the eval format.
+    """
+    model_spec = model_registry("30B-A3B", attn_backend="sdpa")
+    return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
+        model_spec=model_spec,
+        optimizer=OptimizersContainer.Config(
+            lr=5e-6,
+            beta2=0.999,
+            weight_decay=0.0,
+        ),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=None,
+            decay_type="cosine",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=1024,
+            steps=40,
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="arc_challenge",
+        ),
+        checkpoint=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+            initial_load_path="/home/andrewor/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
+            last_save_in_hf=True,
+        ),
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=1,
+        ),
+    )
+
+
+def sft_qwen3_30b_a3b_arc_qat() -> Trainer.Config:
+    """Qwen3-30B-A3B SFT + QAT on ARC-Challenge dataset.
+
+    Same as sft_qwen3_30b_a3b_arc but with NvFP4 fake quantization
+    on MoE expert weights and activations during training.
+    """
+    from torchao.prototype.qat.nvfp4_moe_simple import (
+        apply_simple_fp4_moe_qat_torchtitan,
+    )
+
+    config = sft_qwen3_30b_a3b_arc()
+    config.post_model_init_fn = apply_simple_fp4_moe_qat_torchtitan
+    return config

@@ -50,6 +50,18 @@ DATASETS = {
         loader=partial(_load_c4_dataset, split="validation"),
         sample_processor=_process_c4_text,
     ),
+    "arc_challenge": DatasetConfig(
+        path="allenai/ai2_arc",
+        loader=lambda path: load_dataset(path, name="ARC-Challenge", split="train"),
+        sample_processor=lambda sample: (
+            "Question: {}\nAnswer: {}".format(
+                sample["question"],
+                sample["choices"]["text"][
+                    sample["choices"]["label"].index(sample["answerKey"])
+                ],
+            )
+        ),
+    ),
 }
 
 

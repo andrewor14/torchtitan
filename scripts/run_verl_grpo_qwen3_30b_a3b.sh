@@ -3,7 +3,7 @@
 set -xeuo pipefail
 
 MODEL_PATH=${MODEL_PATH:-/home/andrewor/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}
-NGPUS=${NGPUS:-6}
+NGPUS=${NGPUS:-8}
 
 train_batch_size=${TRAIN_BATCH_SIZE:-64}
 ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-64}
@@ -27,7 +27,8 @@ experiment_name=${EXPERIMENT_NAME:-torchtitan_moe}
 train_files=$HOME/data/gsm8k_math/train.parquet
 val_files=$HOME/data/gsm8k_math/test.parquet
 
-export VLLM_MOE_BACKEND=triton
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export VLLM_USE_FLASHINFER_MOE_FP16=0
 python3 -m verl.trainer.main_ppo_sync \
     model_engine=torchtitan \
     algorithm.adv_estimator=grpo \
@@ -66,7 +67,7 @@ python3 -m verl.trainer.main_ppo_sync \
     actor_rollout_ref.ref.torchtitan.expert_parallel_size=1 \
     actor_rollout_ref.ref.torchtitan.use_torch_compile=False \
     actor_rollout_ref.ref.torchtitan.attn_type=flex \
-    actor_rollout_ref.ref.torchtitan.param_offload=False \
+    actor_rollout_ref.ref.torchtitan.param_offload=True \
     actor_rollout_ref.hybrid_engine=true \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp} \

@@ -48,6 +48,7 @@ class MoEStateDictAdapter(StateDictAdapter):
     the results back to 3D param.
     """
 
+
     def __init__(
         self,
         model_config: Decoder.Config,

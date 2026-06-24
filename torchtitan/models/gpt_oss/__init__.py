@@ -347,9 +347,18 @@ gptoss_configs = {
 
 def model_registry(
     flavor: str,
+    # gpt-oss only supports FlexAttention: its sink attention needs the attention
+    # op's log-sum-exp and a BlockMask (see GptOssAttention). This arg exists only
+    # so the signature matches what verl's torchtitan engine calls every model
+    # with -- model_registry(flavor, attn_backend=engine_config.attn_type) -- and
+    # so must be "flex".
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
+    assert attn_backend == "flex", (
+        f"gpt-oss only supports FlexAttention, got attn_backend={attn_backend!r}"
+    )
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
     )

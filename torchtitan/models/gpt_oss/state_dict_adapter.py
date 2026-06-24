@@ -52,11 +52,14 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             # Transformer layer
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE
-            "model.layers.{}.mlp.experts.gate_up_proj_blocks": "layers.{}.moe.experts.mlp1_weight",
-            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.experts.mlp1_bias",
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.experts.mlp2_weight",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.experts.mlp2_bias",
+            # MoE — HF checkpoint uses gate_up_proj / down_proj (no _blocks suffix)
+            # with shape [E, in_dim, out_dim]. TT parameters have _EGD/_EG/_EDF/_ED
+            # suffixes and store as [E, out_dim, in_dim]. Weight tensors need a
+            # transpose(1, 2) in from_hf/to_hf; biases are 2-D and need no transpose.
+            "model.layers.{}.mlp.experts.gate_up_proj": "layers.{}.moe.experts.mlp1_weight_EGD",
+            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.experts.mlp1_bias_EG",
+            "model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.experts.mlp2_weight_EDF",
+            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.experts.mlp2_bias_ED",
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
@@ -189,6 +192,10 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                     continue
                 hf_key = to_hf_map[abstract_key]
                 hf_key = hf_key.format(layer_num)
+                if value.ndim == 3 and hf_key.endswith(
+                    (".gate_up_proj", ".down_proj")
+                ):
+                    value = value.transpose(1, 2).contiguous()
                 hf_state_dict[hf_key] = value
             else:
                 if key not in to_hf_map:
@@ -262,6 +269,10 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 if tt_key is None:
                     continue
                 tt_key = tt_key.format(layer_num)
+                if value.ndim == 3 and abstract_key.endswith(
+                    (".gate_up_proj", ".down_proj")
+                ):
+                    value = value.transpose(1, 2).contiguous()
                 state_dict[tt_key] = value
             else:
                 tt_key = self.from_hf_map[key]

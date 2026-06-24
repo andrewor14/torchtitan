@@ -181,7 +181,11 @@ class LocalTokenDispatcher(Configurable):
         out_TD = deterministic_scatter_add(
             out_TD,
             metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
-            routed_output_RD,
+            # gpt-oss RL: the experts force bf16 output while out_TD takes x_TD's
+            # (non-bf16) dtype, so scatter_add raises "Expected self.dtype to be
+            # equal to src.dtype" without this cast. Verified needed — the gpt-oss
+            # RL run crashes here otherwise.
+            routed_output_RD.to(out_TD.dtype),
         )
         return out_TD
 
@@ -468,7 +472,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         out_TD = deterministic_scatter_add(
             out_TD,
             token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
-            routed_output_RD,
+            # gpt-oss RL: the experts force bf16 output while out_TD takes x_TD's
+            # (non-bf16) dtype, so scatter_add raises "Expected self.dtype to be
+            # equal to src.dtype" without this cast. Verified needed — the gpt-oss
+            # RL run crashes here otherwise.
+            routed_output_RD.to(out_TD.dtype),
         )
         return out_TD
 

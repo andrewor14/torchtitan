@@ -15,6 +15,7 @@ _supported_experiments = frozenset(
         "ft.llama3",
         "kd.llama3",
         "kd.qwen3",
+        "kd.gpt_oss",
         "rl",
     ]
 )

@@ -33,8 +33,27 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
+def _load_math_sft_dataset(dataset_path: str):
+    """Load the local GSM8K+MATH SFT json (a top-level array of {question, answer})."""
+    return load_dataset("json", data_files=dataset_path, split="train")
+
+
+def _process_math_sft_text(sample: dict[str, Any]) -> str:
+    """Format a math SFT sample as problem + step-by-step solution text.
+
+    Used for in-domain QAD (distill the math-RL teacher on the same GSM8K+MATH
+    domain as QAT, instead of generic C4).
+    """
+    return f"{sample['question']}\n\n{sample['answer']}"
+
+
 # Add your dataset here - more information at docs/datasets.md
 DATASETS = {
+    "math_sft": DatasetConfig(
+        path="/home/andrewor/data/math_sft/train.json",
+        loader=_load_math_sft_dataset,
+        sample_processor=_process_math_sft_text,
+    ),
     "c4": DatasetConfig(
         path="allenai/c4",
         loader=partial(_load_c4_dataset, split="train"),

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -73,6 +74,11 @@ class GptOssGroupedExperts(Module):
         self.mlp2_bias_ED = nn.Parameter(torch.empty((num_experts, dim)))
 
         self.token_dispatcher = config.token_dispatcher.build()
+        # Optional fake-quantization hook for QAT/QAD. When set (e.g. by
+        # torchao's apply_simple_fp4_moe_qat_torchtitan), it is applied to the
+        # expert weights and activations inside _experts_forward. None = no-op,
+        # so non-quantized paths are unaffected.
+        self.fake_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None
 
     def _experts_forward(
         self,
@@ -95,6 +101,11 @@ class GptOssGroupedExperts(Module):
             mlp1_bias_EG = self.mlp1_bias_EG
             mlp2_weight_EDF = self.mlp2_weight_EDF
             mlp2_bias_ED = self.mlp2_bias_ED
+
+        # QAD/QAT: fake-quantize expert weights (mlp1 = fused gate+up, mlp2 = down).
+        if self.fake_quant_fn is not None:
+            mlp1_weight_EGD = self.fake_quant_fn(mlp1_weight_EGD)
+            mlp2_weight_EDF = self.fake_quant_fn(mlp2_weight_EDF)
 
         # Determine tp_degree from device mesh if available
         tp_degree = 1
@@ -120,9 +131,14 @@ class GptOssGroupedExperts(Module):
             [num_tokens_per_expert_E, tail_slack]
         ).long()
 
+        # QAD/QAT: fake-quantize the input activation.
+        x_RD_bf16 = x_RD.bfloat16()
+        if self.fake_quant_fn is not None:
+            x_RD_bf16 = self.fake_quant_fn(x_RD_bf16)
+
         # G = gate+up dimension (2*F)
         h_RG = torch._grouped_mm(
-            x_RD.bfloat16(),
+            x_RD_bf16,
             mlp1_weight_EGD.transpose(-2, -1).bfloat16(),
             offs=offsets_E,
         )
@@ -136,6 +152,9 @@ class GptOssGroupedExperts(Module):
         h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
+        # QAD/QAT: fake-quantize the hidden activation feeding the down projection.
+        if self.fake_quant_fn is not None:
+            h_RF = self.fake_quant_fn(h_RF)
         h_RD = torch._grouped_mm(
             h_RF, mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
         )

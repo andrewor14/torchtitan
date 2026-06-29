@@ -54,6 +54,30 @@ DATASETS = {
         loader=_load_math_sft_dataset,
         sample_processor=_process_math_sft_text,
     ),
+    # Same GSM8K+MATH data but pre-rendered through the gpt-oss chat (harmony)
+    # template, so QAD distills on the model's real inference format (fixes the
+    # raw-text formatting confound seen in math_sft).
+    "math_sft_chat": DatasetConfig(
+        path="/home/andrewor/data/math_sft_chat/train.json",
+        loader=_load_math_sft_dataset,
+        sample_processor=lambda sample: sample["text"],
+    ),
+    # GSM8K+MATH reference solutions rendered in the EXACT RL prompt format
+    # (instruction suffix + harmony template). For QAD runs that match the RL
+    # and lm_eval prompt distribution. See scripts/prepare_math_rlfmt_data.py.
+    "math_rlfmt": DatasetConfig(
+        path="/home/andrewor/data/math_rlfmt/train.json",
+        loader=_load_math_sft_dataset,
+        sample_processor=lambda sample: sample["text"],
+    ),
+    # Teacher-generated rollouts (N samples/prompt from the bf16 teacher) on the
+    # same RL-format prompts. Far more unique, on-teacher-distribution data than
+    # looping the 15k reference set. See scripts/generate_teacher_rollouts.py.
+    "math_teachergen": DatasetConfig(
+        path="/home/andrewor/data/math_teachergen/train.json",
+        loader=_load_math_sft_dataset,
+        sample_processor=lambda sample: sample["text"],
+    ),
     "c4": DatasetConfig(
         path="allenai/c4",
         loader=partial(_load_c4_dataset, split="train"),

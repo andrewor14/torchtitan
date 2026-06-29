@@ -62,11 +62,11 @@ def qwen3_moe_debug_qad() -> KDTrainer.Config:
     stays bf16.
     """
     from torchao.prototype.qat.nvfp4_moe_simple import (
-        apply_simple_fp4_moe_qat_torchtitan,
+        apply_simple_fp4_full_qat_torchtitan,
     )
 
     config = qwen3_moe_debug()
-    config.post_model_init_fn = apply_simple_fp4_moe_qat_torchtitan
+    config.post_model_init_fn = apply_simple_fp4_full_qat_torchtitan
     return config
 
 
@@ -77,7 +77,7 @@ def qwen3_30b_a3b_qad() -> KDTrainer.Config:
     The teacher is initialized from the same HF checkpoint and kept frozen.
     """
     from torchao.prototype.qat.nvfp4_moe_simple import (
-        apply_simple_fp4_moe_qat_torchtitan,
+        apply_simple_fp4_full_qat_torchtitan,
     )
 
     return KDTrainer.Config(
@@ -120,5 +120,33 @@ def qwen3_30b_a3b_qad() -> KDTrainer.Config:
         temperature=2.0,
         alpha=0.5,
         # QAD: fake quantize student MoE experts, teacher stays bf16
-        post_model_init_fn=apply_simple_fp4_moe_qat_torchtitan,
+        post_model_init_fn=apply_simple_fp4_full_qat_torchtitan,
     )
+
+
+def qwen3_30b_a3b_qad_c4_a1t1_2000_lr5e6() -> KDTrainer.Config:
+    """Long pure-KL QAD for Qwen3-30B-A3B on C4, 2000 steps, lr 5e-6.
+
+    Mirrors the gpt-oss QAD-2000 winner recipe on qwen3: alpha=1.0 (pure KL, no
+    hard-label CE) and temperature=1.0 (match teacher distribution exactly), C4,
+    lr 5e-6, warmup 50 + cosine to 10% floor over the full 2000 steps. Student +
+    bf16 teacher both init from the original 200-step RL checkpoint; the student's
+    MoE experts AND dense linears are fp4 fake-quantized (apply_full, gated by
+    QAT_FP4_FAKE_QUANT_LINEARS=1). Checkpoint every 100 steps and keep the last 30
+    (= all 20) so none are purged (the gpt-oss QAD-2000 run lost steps 100-900 to
+    the default keep_latest_k=10).
+    """
+    config = qwen3_30b_a3b_qad()  # C4, init=step200_hf, fp4 fake-quant on student
+    config.alpha = 1.0  # pure KL(teacher || student), drop CE term
+    config.temperature = 1.0  # match teacher distribution exactly
+    config.training.local_batch_size = 4  # try 4 first; orchestrator retries lbs=2 on OOM
+    config.training.steps = 2000
+    config.checkpoint.interval = 100
+    config.checkpoint.keep_latest_k = 30  # keep all 20 ckpts (no purging)
+    config.lr_scheduler = LRSchedulersContainer.Config(
+        warmup_steps=50,
+        decay_ratio=None,     # cosine-decay immediately after warmup
+        decay_type="cosine",
+        min_lr_factor=0.1,    # 10% floor over the full 2000 steps
+    )
+    return config

@@ -1,0 +1,12 @@
+=== EXP3 QAD C4 pure-KL, linear-FQ ON (experts+attention), 500 steps, from RL step-100 (6-29) ===
+run dir: gpt_oss_20b_qad_c4_linON_6-29  (verl checkpoints global_step_{100 200 300 400 500})
+generated: 2026-06-30 02:02:45
+
+References: PTQ nvfp4 MATH 0.496 | prior(no-real-QAT) qat_fq_is step15 nvfp4 MATH 0.522 | bf16 teacher MATH ~0.626
+
+step   GSM8K_bf16 GSM8K_nv  MATH_bf16 MATH_nv  
+100    0.8688    0.8506    0.5620    0.5240   
+200    0.8673    0.8469    0.5600    0.5380   
+300    0.8795    0.8514    0.5640    0.5340   
+400    0.8741    0.8491    0.5940    0.5100   
+500    0.8681    0.8461    0.6000    0.5420   

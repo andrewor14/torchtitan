@@ -1,0 +1,20 @@
+=== EXPERIMENT 1: QAT+RL (IS + rollout FQ), LINEAR-FQ ON (QAT_FP4_FAKE_QUANT_LINEARS=1) ===
+run name : gpt_oss_20b_qat_rollout_fq_is_linON_6-29
+kind     : verl GRPO RL + QAT (torchtitan engine)
+init from : /data/users/andrewor/logs/gpt_oss_20b_rl_6-25_eval/step100_bf16   (RL baseline step-100)
+script   : scripts/run_verl_grpo_gpt_oss_20b_qat_rollout_fq_is.sh
+checkpoints: checkpoints/verl_grpo_gsm8k_math/gpt_oss_20b_qat_rollout_fq_is_linON_6-29/global_step_{10,20,30,40,50}
+--- QAT ---
+post_model_init_fn = torchao...apply_simple_fp4_full_qat_torchtitan
+QAT_FP4_FAKE_QUANT_LINEARS = 1   (fake-quant MoE experts AND attention q/k/v/o, w4a4)
+rollout FQ : VERL_ROLLOUT_FP4_FAKE_QUANT=1
+--- RL hyperparams (== last QAT exp / 6-25 RL) ---
+adv_estimator=grpo  use_kl_in_reward=False
+IS: rollout_correction.bypass_mode=false  rollout_is=sequence  rollout_is_threshold=2.0
+actor.optim.lr=1e-6  use_kl_loss=True  kl_loss_coef=0.02  kl_loss_type=low_var_kl  entropy_coeff=0.001
+train_batch_size=128  ppo_mini_batch_size=128  ppo_micro_batch_size_per_gpu=4  use_dynamic_bsz=True  ppo_max_token_len_per_gpu=8192
+max_prompt_length=512  max_response_length=1024
+rollout: vllm  n=8  gpu_memory_utilization=0.4  enforce_eager=True  max_model_len=4096  tp=1
+parallelism: data_parallel_shard_size=8  tensor_parallel_size=1  expert_parallel_size=1  attn_type=flex
+data: gsm8k + MATH (train/test parquet)
+total_training_steps=50  save_freq=10  total_epochs=1  NGPU=8

@@ -1,0 +1,43 @@
+=== 6-30 EXPERIMENT (QUEUED): Qwen3-30B-A3B QAD C4 pure-KL, linear-FQ ON, 2000 steps ===
+Mirrors the gpt-oss QAD-2000 winner recipe on qwen3. Distills bf16 teacher -> NvFP4
+fake-quant student, both init from the original 200-step RL checkpoint. Launches
+AFTER the qwen3 QAT+RL run (qwen3_30b_a3b_qat_rollout_fq_is_linON_6-30) + its evals finish.
+
+run dir (logs):  /data/users/andrewor/logs/qwen3_30b_a3b_qad_c4_linON_2000_6-30
+config fn:       qwen3_30b_a3b_qad_c4_a1t1_2000_lr5e6  (module kd.qwen3)
+kind:            QAD (knowledge distillation), bf16 teacher -> NvFP4 fake-quant student
+
+--- model / init ---
+model:           Qwen3-30B-A3B, attn_backend=sdpa
+teacher:         bf16, frozen, init from original 200-step RL checkpoint
+student init:    /data/users/andrewor/torchtitan/outputs/rl_continued_v3_06-09/step200_hf
+fake-quant:      apply_simple_fp4_full_qat_torchtitan  (QAT_FP4_FAKE_QUANT_LINEARS=1)
+                 -> MoE experts (gate_up+down) AND dense linears (attn q/k/v/o),
+                    excl lm_head/router/gate -> matches nvfp4 eval scope (w4a4)
+
+--- distillation loss ---
+alpha:           1.0   (pure KL, no hard-label CE)
+temperature:     1.0   (match teacher distribution exactly)
+
+--- optimization ---
+lr:              5e-6  (beta2 0.999, wd 0)
+lr schedule:     warmup 50 -> cosine decay over full 2000 steps, 10% floor
+local_batch:     4 first (global = 4*8 = 32 seqs/step); orchestrator auto-retries lbs=2 on OOM/crash
+seq_len:         2048
+steps:           2000
+dataset:         c4
+
+--- parallelism (8 GPUs) ---
+dp_shard:        -1 (=8); expert_parallel 1; activation ckpt selective
+
+--- checkpointing ---
+interval:        100  (steps 100..2000, 20 checkpoints)
+keep_latest_k:   30   (keep ALL 20 ckpts -> none purged; fixes the gpt-oss QAD-2000 keep=10 loss)
+
+--- evaluation (auto, both precisions) ---
+eval steps:      100 200 ... 2000 (all surviving)
+bf16:  convert_dcp_to_hf (qwen3/30B-A3B) -> lm_eval gsm8k_verl + math500_verify
+nvfp4: quantize_gptoss_nvfp4_modelopt (generic AutoModel, NVFP4_DEFAULT_CFG, single calib, excl lm_head)
+
+References: compare nvfp4 vs bf16 MATH gap closure vs the qwen3 QAT+RL run; the original
+step-200 RL is the bf16 baseline. gpt-oss QAD-2000 plateaued at ~0.55 nvfp4 MATH with bf16 healthy.

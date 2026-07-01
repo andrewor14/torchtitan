@@ -1,0 +1,13 @@
+=== 6-30 Qwen3-30B-A3B QAD C4 pure-KL, linear-FQ ON (experts+attention), 2000 steps, lr 5e-6, from original 200-step RL ===
+run: qwen3_30b_a3b_qad_c4_linON_2000_6-30 | KILLED at step 1000 (planned 2000) | temp_eval: gsm8k_cot_zeroshot + minerva_math500 (comparable to 6-09 baseline), % ===
+step  GSM8K_bf16  GSM8K_nv    MATH_bf16  MATH_nv   
+100   90.52       90.52       89.00      86.00     
+200   90.83       91.13       88.80      88.00     
+300   90.90       90.98       87.40      87.00     
+400   90.37       90.52       87.40      87.20     
+500   90.83       90.83       88.00      87.40     
+600   90.37       90.45       89.20      87.80     
+700   90.52       90.60       87.40      87.60     
+800   90.83       90.98       89.60      88.60     
+900   90.98       91.28       89.60      88.40     
+1000  91.28       91.21       87.40      87.60     

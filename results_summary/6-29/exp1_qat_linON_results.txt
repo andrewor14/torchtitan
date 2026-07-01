@@ -1,0 +1,12 @@
+=== EXP1 QAT+RL+IS+rolloutFQ, linear-FQ ON (experts+attention), 50 steps, from RL step-100 (6-29) ===
+run dir: gpt_oss_20b_qat_rollout_fq_is_linON_6-29  (verl checkpoints global_step_{10 20 30 40 50})
+generated: 2026-06-29 21:26:33
+
+References: PTQ nvfp4 MATH 0.496 | prior(no-real-QAT) qat_fq_is step15 nvfp4 MATH 0.522 | bf16 teacher MATH ~0.626
+
+step   GSM8K_bf16 GSM8K_nv  MATH_bf16 MATH_nv  
+10     0.8044    0.8362    0.6340    0.5060   
+20     0.7619    0.8423    0.6280    0.5260   
+30     0.7218    0.834     0.5920    0.512    
+40     0.6179    0.8294    0.5460    0.5220   
+50     0.4284    0.8469    0.3740    0.5140   

@@ -1,0 +1,53 @@
+=== 6-30 EXPERIMENT: QAD C4 pure-KL, linear-FQ ON, 2000 steps ===
+Extension of the 6-29 EXP3 winner (nvfp4 MATH 0.542 @ step500, bf16 stayed healthy)
+to 4x the steps, to test whether more distillation tokens push nvfp4 MATH past the
+~0.54 plateau without collapsing the bf16 master.
+
+run dir:        /data/users/andrewor/logs/gpt_oss_20b_qad_c4_linON_2000_6-30
+config fn:      gpt_oss_20b_qad_c4_a1t1_2000_lr5e6  (module kd.gpt_oss)
+kind:           QAD (knowledge distillation), bf16 teacher -> NvFP4 fake-quant student
+
+--- model / init ---
+model:          gpt-oss-20b, attn_backend=flex
+teacher:        bf16, frozen, init from RL step-100 bf16 checkpoint
+student init:   /data/users/andrewor/logs/gpt_oss_20b_rl_6-25_eval/step100_bf16
+fake-quant:     apply_simple_fp4_full_qat_torchtitan  (QAT_FP4_FAKE_QUANT_LINEARS=1)
+                -> MoE experts (gate_up + down) AND dense linears (attn q/k/v/o),
+                   excludes lm_head/router/gate  -> matches nvfp4 eval scope (w4a4)
+
+--- distillation loss ---
+alpha:          1.0   (pure KL(teacher || student), no hard-label CE)
+temperature:    1.0   (match teacher distribution exactly)
+
+--- optimization ---
+optimizer lr:   5e-6
+beta2:          0.999
+weight_decay:   0.0
+lr schedule:    warmup 50 steps -> cosine decay over full 2000 steps, 10% floor (min_lr_factor=0.1)
+local_batch:    4   (global = 4 * 8 GPUs = 32 seqs/step)
+seq_len:        2048
+steps:          2000
+dataset:        c4
+
+--- parallelism (8 GPUs) ---
+dp_shard:       -1 (=8)
+expert_parallel: 1
+activation ckpt: selective
+
+--- checkpointing ---
+interval:       100  (steps 100..2000, 20 checkpoints)
+initial_load:   HF bf16 (initial_load_in_hf=True)
+
+--- evaluation (auto, both precisions) ---
+eval steps:     100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000
+bf16:  convert_dcp_to_hf -> lm_eval gsm8k_verl + math500_verify
+nvfp4: quantize_gptoss_nvfp4_modelopt -> lm_eval gsm8k_verl + math500_verify
+
+References: 6-29 EXP3 (same recipe, 500 steps) nvfp4 MATH peaked 0.542 @ step500,
+bf16 MATH 0.56->0.60 (no collapse). PTQ nvfp4 MATH ~0.496. bf16 teacher MATH ~0.626.
+
+--- NOTE (eval) ---
+CheckpointManager keep_latest_k purged steps 100-900 during training;
+only steps 1000-2000 survived and were evaluated. The 6-29 500-step run
+(same recipe) covers steps 100-500, so the surviving 1000-2000 range is the
+novel extended-training part.

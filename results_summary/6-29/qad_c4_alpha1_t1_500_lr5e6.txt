@@ -1,0 +1,25 @@
+=== QAD alpha=1 T=1, C4 dataset, lr=5e-6, 500 steps (6-29) ===
+run dir: /data/users/andrewor/logs/gpt_oss_20b_qad_c4_a1t1_500_lr5e6_6-29
+generated: 2026-06-29 08:05:17
+
+References: PTQ nvfp4 MATH 0.496 | QAT 0.522 | best prior QAD nvfp4 MATH 0.534 | bf16 teacher MATH ~0.626
+
+step   GSM8K_bf16 GSM8K_nv  MATH_bf16 MATH_nv  
+100    0.8719    0.8423    0.5900    0.5160   
+200    0.8711    0.8393    0.5900    0.5340   
+300    0.8749    0.8302    0.5840    0.5380   
+400    0.8749    0.8347    0.5940    0.5320   
+500    0.8726    0.8446    0.5660    0.5220   
+600                                           
+700                                           
+800                                           
+900                                           
+1000                                          
+
+--- training KL(loss) trajectory (every 100 steps) ---
+  step 1     KL=0.13560
+  step 100   KL=0.39229
+  step 200   KL=0.40226
+  step 300   KL=0.38077
+  step 400   KL=0.39768
+  step 500   KL=0.37499

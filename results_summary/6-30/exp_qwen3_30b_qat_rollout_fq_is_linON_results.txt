@@ -1,0 +1,24 @@
+=== QAT+RL for Qwen3-30B-A3B, 100 steps (temp_eval: gsm8k_cot_zeroshot + minerva_math500, %) ===
+run: qwen3_30b_a3b_qat_rollout_fq_is_linON_6-30 | from original 200-step RL ckpt | apply_full (experts+attn, w4a4) + rollout FQ + IS | lr 1e-6
+harness: torchao temp_eval.py (nvfp4 via unfuse-experts + modelopt), identical to the 6-09 baseline below
+
+step  GSM8K_bf16  GSM8K_nv    MATH_bf16  MATH_nv   
+10    91.05       91.43       86.60      85.80     
+20    91.66       90.52       86.40      87.20     
+30    91.05       91.81       88.20      87.40     
+40    90.83       92.04       88.00      87.40     
+50    91.13       91.96       88.20      87.80     
+60    91.43       92.04       89.80      88.00     
+70    92.27       92.12       89.40      87.60     
+80    92.42       91.21       89.80      90.00     
+90    92.34       91.21       89.40      90.00     
+100   92.42       92.04       89.40      89.40     
+
+--- BASELINE (original RL, no QAT), steps 150-200, same harness/tasks ---
+step  GSM8K_bf16  GSM8K_nv    MATH_bf16  MATH_nv   
+150   90.37       90.75       87.40      86.00     
+160   90.14       90.22       86.80      86.00     
+170   90.07       90.07       87.80      85.60     
+180   89.92       91.36       88.20      86.00     
+190   90.98       91.21       88.60      86.00     
+200   90.30       91.36       86.80      86.60     

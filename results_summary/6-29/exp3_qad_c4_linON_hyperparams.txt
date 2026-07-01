@@ -1,0 +1,19 @@
+=== EXPERIMENT 3: QAD (KD, bf16 teacher -> nvfp4 student), LINEAR-FQ ON (QAT_FP4_FAKE_QUANT_LINEARS=1) ===
+run name : gpt_oss_20b_qad_c4_linON_6-29
+kind     : torchtitan KD experiment (MODULE=kd.gpt_oss)
+config   : gpt_oss_20b_qad_c4_a1t1_500_lr5e6   (== last QAD exp)
+init from : /data/users/andrewor/logs/gpt_oss_20b_rl_6-25_eval/step100_bf16   (RL baseline step-100; both teacher and student)
+dump dir : /data/users/andrewor/logs/gpt_oss_20b_qad_c4_linON_6-29
+checkpoints: <dump>/checkpoint/step-{100,200,300,400,500}
+--- QAT/QAD fake-quant ---
+post_model_init_fn = torchao...apply_simple_fp4_full_qat_torchtitan
+QAT_FP4_FAKE_QUANT_LINEARS = 1   (fake-quant student MoE experts AND attention q/k/v/o, w4a4; teacher bf16)
+--- KD hyperparams (== last QAD exp / C4 run) ---
+alpha=1.0  temperature=1.0  (pure KL)
+optimizer: lr=5e-6  beta2=0.999  weight_decay=0.0
+lr_scheduler: warmup_steps=50  decay_ratio=None  cosine  min_lr_factor=0.1
+training: local_batch_size=4  seq_len=2048  steps=500
+dataloader: c4
+checkpoint: interval=100  initial_load_in_hf=True  last_save_in_hf=True
+activation_checkpoint=selective  parallelism: data_parallel_shard_degree=-1  expert_parallel_degree=1  attn_backend=flex
+NGPU=8

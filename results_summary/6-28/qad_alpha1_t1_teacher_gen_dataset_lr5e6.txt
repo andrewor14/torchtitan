@@ -1,0 +1,30 @@
+=== QAD alpha=1 T=1, teacher-generated dataset, lr=5e-6 (run 2 retry) ===
+run dir: /data/users/andrewor/logs/gpt_oss_20b_qad_a1t1_teachergen_lr5e6_6-28
+generated: 2026-06-28 13:02:37
+
+References: PTQ nvfp4 MATH 0.496 | QAT 0.522 | best prior QAD nvfp4 MATH 0.534 | bf16 teacher MATH ~0.626
+
+step   GSM8K_bf16 GSM8K_nv  MATH_bf16 MATH_nv  
+100    0.8415    0.8355    0.5980    0.5020   
+200    0.8484    0.8408    0.5820    0.5120   
+300    0.8666    0.8408    0.5900    0.4900   
+400    0.8544    0.8385    0.5520    0.5280   
+500    0.8446    0.8378    0.5620    0.4960   
+600    0.856     0.834     0.546     0.510    
+700    0.8529    0.8476    0.5440    0.5160   
+800    0.8469    0.8544    0.5440    0.5040   
+900    0.8484    0.8469    0.5580    0.4980   
+1000   0.8453    0.8514    0.5800    0.5180   
+
+--- training KL(loss) trajectory (every 100 steps) ---
+  step 1     KL=0.90597
+  step 100   KL=0.28797
+  step 200   KL=0.26906
+  step 300   KL=0.34685
+  step 400   KL=0.31492
+  step 500   KL=0.34963
+  step 600   KL=0.25526
+  step 700   KL=0.31782
+  step 800   KL=0.31019
+  step 900   KL=0.28770
+  step 1000  KL=0.29375

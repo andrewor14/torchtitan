@@ -1,0 +1,52 @@
+=== 6-30 EXPERIMENT: Qwen3-30B-A3B QAT + RL (rollout FQ + IS), linear-FQ ON, 100 steps ===
+QAT+RL redo on Qwen3-30B-A3B, resuming from the original 200-step (non-QAT) RL checkpoint.
+Tests whether genuine torchao QAT (experts + attention linears, w4a4) + FQ rollouts + IS
+closes the nvfp4 gap on qwen3, mirroring the gpt-oss QAT sweep.
+
+run dir (logs):  /data/users/andrewor/logs/qwen3_30b_a3b_qat_rollout_fq_is_linON_6-30
+verl ckpts:      /data/users/andrewor/torchtitan/checkpoints/verl_grpo_qwen3_30b_a3b/qwen3_30b_a3b_qat_rollout_fq_is_linON_6-30/global_step_{10..100}
+script:          scripts/run_verl_grpo_qwen3_30b_a3b_qat_rollout_fq_is.sh
+init checkpoint: /data/users/andrewor/torchtitan/outputs/rl_continued_v3_06-09/step200_hf
+                 (original 200-step RL checkpoint, HF format; DCP not available)
+
+--- QAT (torchao, verl post_model_init_fn) ---
+fn:              torchao.prototype.qat.nvfp4_moe_simple.apply_simple_fp4_full_qat_torchtitan
+QAT_FP4_FAKE_QUANT_LINEARS=1  -> apply_full: MoE experts AND dense linears
+quantized (w4a4, fake-quant STE), VERIFIED to match nvfp4 eval scope EXACTLY:
+  - MoE experts        moe.experts (gate_up + down)   <-> eval mlp.experts.*.{gate,up,down}_proj
+  - attention q/k/v    attention.qkv_linear.wq/wk/wv  <-> eval self_attn.{q,k,v}_proj
+  - attention o        attention.wo                   <-> eval self_attn.o_proj
+excluded (bf16, both QAT and eval):
+  - lm_head, MoE router (moe.router.gate / mlp.gate), all norms
+counts (48 layers): 48 GroupedExperts (128 experts each) + 192 attn linears wrapped; 49 excluded
+
+--- rollout fake quant + importance sampling ---
+VERL_ROLLOUT_FP4_FAKE_QUANT=1  (vLLM rollouts generated with fp4-fake-quant MoE)
+rollout_correction.bypass_mode=false, rollout_is=sequence, rollout_is_threshold=2.0 (decoupled 3-policy IS)
+
+--- RL hyperparams (EXACT match to original non-QAT run, run_verl_grpo_qwen3_30b_a3b.sh) ---
+train_batch_size / ppo_mini_batch:   64 / 64
+ppo_micro_batch_size_per_gpu:        4 (use_dynamic_bsz=True)
+max_prompt / max_response:           512 / 512
+ppo_max_token_len_per_gpu:           8192
+actor lr:                            1e-6
+use_kl_loss:                         False
+entropy_coeff:                       0
+rollout n / tp / gpu_mem_util:       4 / 1 / 0.4
+dp_shard / tp / ep / attn:           8 / 1 / 1 / flex
+param_offload / optimizer_offload:   True / True
+data:                                $HOME/data/gsm8k_math/train.parquet (GSM8K + MATH)
+env:                                 VLLM_USE_FLASHINFER_MOE_FP16=0, PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+--- this run ---
+total_training_steps:  100
+save_freq:             10  (checkpoints at steps 10,20,...,100)
+test_freq:             -1 (offline eval instead)
+
+--- evaluation (auto, both precisions) ---
+eval steps: 10 20 30 40 50 60 70 80 90 100
+bf16:  convert_dcp_to_hf (qwen3/30B-A3B) -> lm_eval gsm8k_verl + math500_verify
+nvfp4: quantize_gptoss_nvfp4_modelopt (generic AutoModel, NVFP4_DEFAULT_CFG, single calib, excl lm_head)
+       -> lm_eval (quantization=modelopt_fp4)
+
+References: original step-200 RL is the bf16 baseline; compare nvfp4 vs bf16 gap closure over QAT steps.

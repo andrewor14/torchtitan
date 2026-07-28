@@ -89,10 +89,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
-            # activate_flash_attention_impl() will restore internal global state
-            # and re-run register function, so we want to only call it once.
+        # FA3 runs on Hopper only; fall back to FA2 on other archs
+        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
+            # only (re)activate once; activate_flash_attention_impl() resets state
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
         else:

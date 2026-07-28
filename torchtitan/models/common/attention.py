@@ -103,8 +103,8 @@ class VarlenAttention(Module):
 
         from torchtitan.tools.utils import has_cuda_capability
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
+        # FA3 runs on Hopper only; fall back to FA2 on other archs
+        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
 

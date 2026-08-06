@@ -270,9 +270,31 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-async def main():
-    config = ConfigManager().parse_args()
-    assert isinstance(config, Controller.Config)
+async def run(
+    config: Controller.Config,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    host_meshes: HostMeshes | None,
+) -> None:
+    """Drive training given already-resolved world sizes and host meshes.
+
+    ``host_meshes=None`` means single-node: partition ``this_host()`` between
+    the trainer and generators via ``CUDA_VISIBLE_DEVICES``. A non-None
+    ``HostMeshes`` places each role on its own hosts (e.g. the SLURM launcher).
+    Launcher-agnostic: local, SLURM, and MAST runs all funnel through here.
+    """
+    # The controller is a plain client process, not a monarch actor, so nothing
+    # else configures its logging -- the actors each call init_logger() in their
+    # own __init__. Without this the root logger has no handler and sits at
+    # WARNING, so every controller logger.info (the per-step console metrics and
+    # the [weight-sync] dial line below) is dropped and warnings fall through to
+    # logging.lastResort on stderr. It used to work only by accident: torchstore
+    # installs a root handler at import, but only when
+    # HYPERACTOR_CODEC_MAX_FRAME_LENGTH is unset -- and the batch launcher sets
+    # that var in the submitting process, which sbatch then exports to the job.
+    init_logger()
+
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -283,14 +305,10 @@ async def main():
 
     rl_trainer: Controller = config.build()
     try:
-        trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-        per_generator_world_size = _compute_generator_world_size(
-            config.generator.parallelism
-        )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
-            host_meshes=None,
+            host_meshes=host_meshes,
             num_generators=config.num_generators,
             generator_env=breakable_cudagraph_env(config.generator),
         )
@@ -303,6 +321,21 @@ async def main():
         logger.info("Interrupted; attempting graceful shutdown...")
     finally:
         await rl_trainer.close()
+
+
+async def main():
+    config = ConfigManager().parse_args()
+    assert isinstance(config, Controller.Config)
+    trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+    per_generator_world_size = _compute_generator_world_size(
+        config.generator.parallelism
+    )
+    await run(
+        config,
+        trainer_world_size=trainer_world_size,
+        per_generator_world_size=per_generator_world_size,
+        host_meshes=None,
+    )
 
 
 if __name__ == "__main__":

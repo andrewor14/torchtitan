@@ -26,9 +26,11 @@ from monarch.actor import (
     concurrent_endpoint,
     context,
     current_rank,
+    endpoint,
     Port,
     PortReceiver,
 )
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.spmd_types import (
@@ -1061,6 +1063,10 @@ class VLLMGenerator(Actor, Configurable):
                 f"before {endpoint_name}"
             )
 
+    # Concurrent, not a plain `@endpoint`: this body awaits `generation_future` to
+    # completion, and a plain endpoint holds the actor's message-dispatch loop for
+    # its whole duration. That pins the engine to one in-flight request no matter
+    # how many the controller fans out -- vLLM reports "Running: 1 reqs" forever.
     @concurrent_endpoint
     @sl.log_trace_span("generate")
     async def generate(
@@ -1293,7 +1299,13 @@ class VLLMGenerator(Actor, Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-    @concurrent_endpoint
+    # Deliberately a plain `@endpoint`, unlike `generate`. `_model_state_dict_pull_request`
+    # and `_pull_model_state_dict_future` below are single-slot, so two overlapping pulls
+    # would clobber each other: the second overwrites the first's future, the engine loop
+    # then resolves the survivor with the wrong version and the clobbered caller never
+    # wakes. Serial dispatch is what currently makes that unreachable. Fix the single-slot
+    # handoff (see the TODO below) before making this concurrent.
+    @endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.

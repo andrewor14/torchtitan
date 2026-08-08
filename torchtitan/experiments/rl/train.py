@@ -33,6 +33,7 @@ from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.observability import structured_logger as sl
+from torchtitan.tools.logging import init_logger
 
 
 logger = logging.getLogger(__name__)

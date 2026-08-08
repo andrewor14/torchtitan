@@ -482,6 +482,10 @@ class PolicyTrainer(Actor, Configurable):
         """
         return self.checkpointer.save(step, last_step=last_step)
 
+    # Concurrent, not a plain `@endpoint`: the controller fires this in the background
+    # specifically so the weight handoff overlaps the next training step. A plain
+    # endpoint holds the dispatch loop for the whole push, which serializes it against
+    # the next `forward_backward` and cancels that overlap.
     @concurrent_endpoint
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:

@@ -851,12 +851,18 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # Model hidden dim, threaded by the builder so the expand buffer can be created
         # eagerly at wire_meshes (before any cudagraph capture). None until the builder sets it.
         hidden_dim: int | None = None
+        # Pad each local expert's token group to a multiple of this value so a quantized
+        # grouped GEMM (e.g. MXFP8, block size 32) gets aligned group offsets. None (default,
+        # bf16) means no padding. Set by the MXFP8 converter via swap_token_dispatcher.
+        # Expand path pads natively (DeepEP expert_alignment); compact path pads in Python.
+        pad_multiple: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
         self.cudagraphable = config.cudagraphable
+        self.pad_multiple = config.pad_multiple
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -924,6 +930,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             ep_group,
             num_max_tokens_per_rank=self.num_max_tokens_per_rank,
             cudagraphable=self.cudagraphable,
+            pad_multiple=self.pad_multiple,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)

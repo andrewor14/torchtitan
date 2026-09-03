@@ -228,12 +228,12 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
         class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
 
-        def _grouped_mm(self, *, A, B_t, offs):
+        def _grouped_mm(self, *, A, weight_EOI, offs):
             from torchtitan.components.quantization.mxfp8.utils import (
                 _MXFP8GroupedMMFwdBF16Bwd,
             )
 
-            return _MXFP8GroupedMMFwdBF16Bwd.apply(A, B_t, offs)
+            return _MXFP8GroupedMMFwdBF16Bwd.apply(A, weight_EOI, offs)
 
     MXFP8QATGroupedExperts.__name__ = f"MXFP8QAT{parent_cls.__name__}"
     MXFP8QATGroupedExperts.__qualname__ = f"MXFP8QAT{parent_cls.__name__}"

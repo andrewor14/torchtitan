@@ -79,7 +79,7 @@ class _MXFP8GroupedMMFwdBF16Bwd(torch.autograd.Function):
     def forward(
         ctx,
         A_MK: torch.Tensor,
-        B_t_EKN: torch.Tensor,
+        weight_ENK: torch.Tensor,
         offsets_E: torch.Tensor,
     ) -> torch.Tensor:
         from torchao.prototype.moe_training.kernels.mxfp8 import (
@@ -87,10 +87,10 @@ class _MXFP8GroupedMMFwdBF16Bwd(torch.autograd.Function):
             triton_mx_block_rearrange_per_group_3d,
         )
 
-        if A_MK.ndim != 2 or B_t_EKN.ndim != 3:
+        if A_MK.ndim != 2 or weight_ENK.ndim != 3:
             raise ValueError(
                 "MXFP8 grouped mm expects a 2D activation and 3D weight, got "
-                f"{A_MK.ndim}D and {B_t_EKN.ndim}D."
+                f"{A_MK.ndim}D and {weight_ENK.ndim}D."
             )
 
         # Activation: CuteDSL emits the blocked scale layout the GEMM wants, so
@@ -98,9 +98,9 @@ class _MXFP8GroupedMMFwdBF16Bwd(torch.autograd.Function):
         act_qdata, act_scales_blocked = mxfp8_quantize_2d_1x32_cutedsl(
             A_MK, scaling_mode=_SCALE_MODE, offs=offsets_E
         )
-        # Weight: quantize along K in the (E, N, K) view, then swizzle.
+        # Weight: quantize along K, which is already the last dim as stored.
         w_qdata, w_scales = triton_to_mxfp8_dim0(
-            B_t_EKN.transpose(-2, -1).contiguous(), _BLOCK_SIZE, _SCALE_MODE
+            weight_ENK.contiguous(), _BLOCK_SIZE, _SCALE_MODE
         )
         w_scales_blocked = triton_mx_block_rearrange_per_group_3d(w_scales)
 
@@ -112,29 +112,29 @@ class _MXFP8GroupedMMFwdBF16Bwd(torch.autograd.Function):
             offs=offsets_E,
             out_dtype=torch.bfloat16,
         )
-        ctx.save_for_backward(A_MK, B_t_EKN, offsets_E)
+        ctx.save_for_backward(A_MK, weight_ENK, offsets_E)
         return out
 
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_out_MN: torch.Tensor):
-        A_MK, B_t_EKN, offsets_E = ctx.saved_tensors
+        A_MK, weight_ENK, offsets_E = ctx.saved_tensors
         # grad_out may be non-contiguous (e.g. expanded with stride 0);
         # torch._grouped_mm needs real strides.
         grad_out_MN = grad_out_MN.contiguous()
         grad_A_MK = torch._grouped_mm(
             grad_out_MN,
-            B_t_EKN.transpose(-2, -1),
+            weight_ENK,
             offs=offsets_E,
             out_dtype=torch.bfloat16,
         )
-        grad_B_ENK = torch._grouped_mm(
+        grad_weight_ENK = torch._grouped_mm(
             grad_out_MN.transpose(-2, -1),
             A_MK,
             offs=offsets_E,
             out_dtype=torch.bfloat16,
         )
-        return grad_A_MK, grad_B_ENK.transpose(-2, -1), None
+        return grad_A_MK, grad_weight_ENK, None
 
 
 def _quantize_expert_state_dict_to_mxfp8(

@@ -247,6 +247,14 @@ class InterGeneratorRouter(Actor, Configurable):
         #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
+    async def _close_generators(self) -> list[Any | BaseException]:
+        """Stop routing, drain in-flight calls, then close every generator."""
+        for h in self._generators:
+            self._set_state(h, _GeneratorState.SYNCING)
+
+        await asyncio.gather(*[h.idle.wait() for h in self._generators])
+        return await self._fanout("close", return_exceptions=True)
+
     @concurrent_endpoint
     async def generate(
         self,
@@ -295,4 +303,4 @@ class InterGeneratorRouter(Actor, Configurable):
     @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""
-        return await self._fanout("close", return_exceptions=True)
+        return await self._close_generators()

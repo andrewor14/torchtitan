@@ -32,15 +32,30 @@ from dataclasses import dataclass
 # imports transitively importing torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
+from monarch.actor import HostMesh, ProcMesh, default_bootstrap_cmd, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.observability import structured_logger as sl
 
-
 logger = logging.getLogger(__name__)
+
+
+def _configure_local_compile_cache() -> None:
+    """Keep compiler caches process-local on multinode RL jobs."""
+    role = os.environ.get("TORCHTITAN_RL_ROLE", "unknown")
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    proc_id = f"{role}-{os.uname().nodename}-{os.getpid()}"
+    cache_root = os.path.join("/tmp", f"torchtitan-rl-{os.getuid()}", job_id, proc_id)
+    cache_dirs = {
+        "TRITON_CACHE_DIR": os.path.join(cache_root, "triton"),
+        "TORCHINDUCTOR_CACHE_DIR": os.path.join(cache_root, "torchinductor"),
+        "VLLM_CACHE_ROOT": os.path.join(cache_root, "vllm"),
+    }
+    for env_name, cache_dir in cache_dirs.items():
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ[env_name] = cache_dir
 
 
 def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
@@ -66,9 +81,11 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
 
 
 def _preimport_torch() -> None:
-    """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
+    """Pre-import shared runtime modules on the spawned process."""
+    _configure_local_compile_cache()
     # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
     import torch  # noqa: F401
+    import torchstore  # noqa: F401
 
 
 def _bootstrap_generator() -> None:
@@ -171,6 +188,7 @@ def _spawn_proc_mesh(
     bootstrap: Callable[[], None],
     role: str,
     extra_env: dict[str, str] | None = None,
+    provisioner: PerHostProvisioner | None = None,
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
     evenly across the mesh's hosts. ``extra_env`` is applied in each proc's bootstrap.
@@ -181,8 +199,11 @@ def _spawn_proc_mesh(
         f"host count ({nodes})"
     )
     role_gpus_per_node = role_world_size // nodes
-    provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
-    env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
+    # Reuse a caller-owned provisioner when multiple role meshes share one
+    # physical host so each mesh receives a disjoint GPU range.
+    provisioner = provisioner or PerHostProvisioner(total_gpus=gpus_per_node)
+    role_env = {**(extra_env or {}), "TORCHTITAN_RL_ROLE": role}
+    env = provisioner.allocate(role_gpus_per_node, extra_env=role_env)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
         bootstrap=bootstrap,
@@ -229,12 +250,22 @@ def spawn_proc_mesh(
             f"got {len(generator_host_meshes)}"
         )
 
+        # A HostMesh may intentionally appear more than once, e.g. two
+        # independent TP=4 vLLM instances colocated on one eight-GPU node.
+        provisioners: dict[int, PerHostProvisioner] = {}
+
+        def provisioner_for(host_mesh: HostMesh) -> PerHostProvisioner:
+            return provisioners.setdefault(
+                id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
+            )
+
         trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh,
             trainer_world_size,
             gpus_per_node,
             bootstrap=_preimport_torch,
             role="trainer",
+            provisioner=provisioner_for(trainer_host_mesh),
         )
         generator_meshes = [
             _spawn_proc_mesh(
@@ -242,10 +273,11 @@ def spawn_proc_mesh(
                 per_generator_world_size,
                 gpus_per_node,
                 bootstrap=_bootstrap_generator,
-                role="generator",
+                role=f"generator_{idx}",
                 extra_env=generator_env,
+                provisioner=provisioner_for(gen_host_mesh),
             )
-            for gen_host_mesh in generator_host_meshes
+            for idx, gen_host_mesh in enumerate(generator_host_meshes)
         ]
     else:
         # Single-node mode: partition GPUs on this_host() via
@@ -256,7 +288,10 @@ def spawn_proc_mesh(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,
             bootstrap_command=default_bootstrap_cmd().with_env(
-                provisioner.allocate(trainer_world_size)
+                provisioner.allocate(
+                    trainer_world_size,
+                    extra_env={"TORCHTITAN_RL_ROLE": "trainer"},
+                )
             ),
         )
         generator_meshes = [
@@ -265,7 +300,11 @@ def spawn_proc_mesh(
                 bootstrap=_bootstrap_generator,
                 bootstrap_command=default_bootstrap_cmd().with_env(
                     provisioner.allocate(
-                        per_generator_world_size, extra_env=generator_env
+                        per_generator_world_size,
+                        extra_env={
+                            "TORCHTITAN_RL_ROLE": "generator",
+                            **(generator_env or {}),
+                        },
                     )
                 ),
             )

@@ -131,6 +131,8 @@ from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
+from torchtitan.experiments.rl.rollout.verifiers.env_server import VerifiersEnvServer
+from torchtitan.experiments.rl.rollout.verifiers.rollouter import VerifiersRollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
@@ -203,8 +205,7 @@ class AsyncLoopConfig(Configurable.Config):
             )
         if self.window_fraction is not None and not (0 < self.window_fraction <= 1):
             raise ValueError(
-                "window_fraction must be None or in (0, 1], got "
-                f"{self.window_fraction}"
+                f"window_fraction must be None or in (0, 1], got {self.window_fraction}"
             )
         if (
             self.window_fraction is not None
@@ -302,6 +303,9 @@ class Controller(Configurable):
         renderer: RendererConfig
         """Message-to-token renderer config."""
 
+        verifiers_env_server: VerifiersEnvServer.Config | None = None
+        """Controller-owned EnvServer required by a Verifiers-backed rollouter."""
+
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config
         )
@@ -338,6 +342,12 @@ class Controller(Configurable):
         )
 
         def __post_init__(self):
+            uses_verifiers = isinstance(self.rollouter, VerifiersRollouter.Config)
+            if uses_verifiers != (self.verifiers_env_server is not None):
+                raise ValueError(
+                    "a VerifiersRollouter and controller.verifiers_env_server must either "
+                    "both be configured or both be absent"
+                )
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -413,6 +423,20 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        trainer_parallelism = config.trainer.parallelism
+        self.trainer_gpu_count = (
+            trainer_parallelism.data_parallel_replicate_degree
+            * max(trainer_parallelism.data_parallel_shard_degree, 1)
+            * trainer_parallelism.tensor_parallel_degree
+            * trainer_parallelism.pipeline_parallel_degree
+            * trainer_parallelism.context_parallel_degree
+        )
+        generator_parallelism = config.generator.parallelism
+        self.generator_gpu_count = config.num_generators * (
+            generator_parallelism.data_parallel_degree
+            * generator_parallelism.tensor_parallel_degree
+        )
+        self.total_gpu_count = self.trainer_gpu_count + self.generator_gpu_count
         self.trainer: PolicyTrainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -437,6 +461,11 @@ class Controller(Configurable):
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
         # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
         self._rollouter: Rollouter = config.rollouter.build()
+        self._verifiers_env_server = (
+            config.verifiers_env_server.build()
+            if config.verifiers_env_server is not None
+            else None
+        )
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
@@ -444,6 +473,18 @@ class Controller(Configurable):
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
+
+        if isinstance(self._rollouter, VerifiersRollouter):
+            try:
+                await self._rollouter.close()
+            except Exception:
+                logger.exception("rollouter.close failed")
+
+        if self._verifiers_env_server is not None:
+            try:
+                await self._verifiers_env_server.close()
+            except Exception:
+                logger.exception("verifiers_env_server.close failed")
 
         if self.trainer is not None:
             try:
@@ -556,6 +597,12 @@ class Controller(Configurable):
         config = self.config
         if not generator_meshes:
             raise ValueError("setup_async requires at least one generator mesh")
+
+        if self._verifiers_env_server is not None:
+            verifiers_env_server_address = await self._verifiers_env_server.start()
+            await self._rollouter.connect_verifiers_env_server(
+                verifiers_env_server_address
+            )
 
         trainer_parallelism = config.trainer.parallelism
         dp_shard = max(trainer_parallelism.data_parallel_shard_degree, 1)
@@ -1053,12 +1100,14 @@ class Controller(Configurable):
                 await self.generator_router.sync_log_step.call_one(step)
             step_timer = MetricsTimer()
 
-            with sl.log_trace_span("train_step"), step_timer.record(
-                "timing/step/total"
+            with (
+                sl.log_trace_span("train_step"),
+                step_timer.record("timing/step/total"),
             ):
                 # Waits for a TrainingBatch to be ready (or None on shutdown).
-                with sl.log_trace_span("wait_for_training_batch"), step_timer.record(
-                    "timing/step/wait_for_training_batch"
+                with (
+                    sl.log_trace_span("wait_for_training_batch"),
+                    step_timer.record("timing/step/wait_for_training_batch"),
                 ):
                     packed = await training_batch_queue.get()
 
@@ -1077,11 +1126,28 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
+                if self.config.trainer.enable_kl_artifact_logging:
+                    with (
+                        sl.log_trace_span("capture_kl0_artifacts"),
+                        step_timer.record("timing/step/capture_kl0_artifacts"),
+                    ):
+                        for microbatch_index, microbatch in enumerate(
+                            packed.microbatches
+                        ):
+                            await self.trainer.capture_kl_artifact.call(
+                                microbatch,
+                                packed.num_global_valid_tokens,
+                                step,
+                                microbatch_index,
+                                "kl0",
+                            )
+
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
                 #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optim.
-                with sl.log_trace_span("forward_backward"), step_timer.record(
-                    "timing/step/forward_backward"
+                with (
+                    sl.log_trace_span("forward_backward"),
+                    step_timer.record("timing/step/forward_backward"),
                 ):
                     # fwd_bwd on all microbatches
                     microbatch_metrics = [
@@ -1100,26 +1166,69 @@ class Controller(Configurable):
                         break
 
                 # Await trainer weight push to finish before optim step mutates the weights.
-                with sl.log_trace_span(
-                    "blocking_trainer_push_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_trainer_push_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
                 ):
                     push_metrics = await self._weight_sync.wait_prev_push()
 
-                with sl.log_trace_span("optim_step"), step_timer.record(
-                    "timing/step/optim"
+                with (
+                    sl.log_trace_span("optim_step"),
+                    step_timer.record("timing/step/optim"),
                 ):
                     optim_result = self._get_rank_0_value(
                         await self.trainer.optim_step.call()
                     )
                 self._trainer_policy_version = optim_result.policy_version
 
+                post_update_metrics: dict[str, float] = {}
+                if self.config.trainer.enable_kl_artifact_logging:
+                    with (
+                        sl.log_trace_span("capture_kl1_artifacts"),
+                        step_timer.record("timing/step/capture_kl1_artifacts"),
+                    ):
+                        post_update_microbatch_metrics = [
+                            self._get_rank_0_value(
+                                await self.trainer.capture_kl_artifact.call(
+                                    microbatch,
+                                    packed.num_global_valid_tokens,
+                                    step,
+                                    microbatch_index,
+                                    "kl1",
+                                )
+                            )
+                            for microbatch_index, microbatch in enumerate(
+                                packed.microbatches
+                            )
+                        ]
+                        post_update_metrics = combine_microbatch_metrics(
+                            post_update_microbatch_metrics
+                        )
+                elif self.config.trainer.enable_post_update_metrics:
+                    with (
+                        sl.log_trace_span("post_update_metrics"),
+                        step_timer.record("timing/step/post_update_metrics"),
+                    ):
+                        post_update_microbatch_metrics = [
+                            self._get_rank_0_value(
+                                await self.trainer.post_update_metrics.call(
+                                    microbatch, packed.num_global_valid_tokens
+                                )
+                            )
+                            for microbatch in packed.microbatches
+                        ]
+                        post_update_metrics = combine_microbatch_metrics(
+                            post_update_microbatch_metrics
+                        )
+
                 # Await generator weight pull to finish before the trainer's next push.
-                with sl.log_trace_span(
-                    "blocking_generator_pull_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_generator_pull_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_generator_pull_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_generator_pull_model_state_dict"
+                    ),
                 ):
                     pull_metrics = await self._weight_sync.wait_prev_pull()
 
@@ -1145,6 +1254,10 @@ class Controller(Configurable):
                             m.Metric(key, m.NoReduce(value))
                             for key, value in optim_result.metrics.items()
                         ],
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in post_update_metrics.items()
+                        ],
                         *self._group_buffer.metrics(),
                         *time_metrics,
                         *policy_age_panel,
@@ -1154,6 +1267,8 @@ class Controller(Configurable):
                         *compute_perf_ratio_metrics(
                             num_global_valid_tokens=packed.num_global_valid_tokens,
                             time_metrics=time_metrics,
+                            trainer_gpu_count=self.trainer_gpu_count,
+                            total_gpu_count=self.total_gpu_count,
                         ),
                     ],
                 )

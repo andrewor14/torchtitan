@@ -38,6 +38,9 @@ class _Endpoint:
             raise RuntimeError("endpoint failed")
         return self.value
 
+    async def call(self, *args, **kwargs):
+        return await self.call_one(*args, **kwargs)
+
 
 class _Actor:
     """A single-rank generator mesh fake."""
@@ -52,6 +55,7 @@ class _Actor:
     ):
         self.generate = _Endpoint(name, wait=wait_generate)
         self.pull_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
+        self.close = _Endpoint()
 
     def flatten(self, *args, **kwargs):
         return self
@@ -479,5 +483,29 @@ def test_pull_model_state_dict_pulls_every_generator():
             [((7,), {})],
             [((7,), {})],
         ]
+
+    asyncio.run(_run())
+
+
+def test_close_generators_drains_inflight_routes_before_closing():
+    async def _run():
+        actor = _Actor("gen0", wait_generate=True)
+        router = _router([actor])
+
+        route_task = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext())
+        )
+        await actor.generate.started.wait()
+
+        close_task = asyncio.create_task(router._close_generators())
+        await asyncio.sleep(0)
+        assert not close_task.done()
+        assert actor.close.calls == []
+        assert router._generators[0].state is _GeneratorState.SYNCING
+
+        actor.generate.release.set()
+        assert await route_task == "gen0"
+        assert await close_task == [None]
+        assert actor.close.calls == [((), {})]
 
     asyncio.run(_run())

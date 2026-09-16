@@ -372,10 +372,12 @@ class MXFP8Linear(Linear):
 
     def _install_weight_sync_tensor(self) -> None:
         """Install a tensor that quantizes the BF16 parameter on weight sync."""
-        assert isinstance(self.weight, _LinearShardedTensorWithMXFP8Compute)
+        weight = self.weight
+        if isinstance(weight, _LinearShardedTensorWithMXFP8Compute):
+            weight = weight._tensor
         with torch.no_grad():
             self.weight = nn.Parameter(
-                _MXFP8WeightSyncTensor(self.weight._tensor),
+                _MXFP8WeightSyncTensor(weight),
                 requires_grad=False,
             )
 

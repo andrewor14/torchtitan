@@ -400,6 +400,7 @@ class VLLMModelWrapper(Module):
             with self.spmd_context():
                 self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
+        self._weight_sync_state_dict_metadata = None
         self._install_weight_sync_tensors()
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
@@ -414,18 +415,46 @@ class VLLMModelWrapper(Module):
 
     def _install_weight_sync_tensors(self) -> None:
         """Install weight sync representations, such as quantized weights."""
-        has_weight_sync_modules = False
-        for module in self.model.modules():
-            install_weight_sync_tensor = getattr(
-                module, "_install_weight_sync_tensor", None
+        installers = [
+            install
+            for module in self.model.modules()
+            if (
+                install := getattr(module, "_install_weight_sync_tensor", None)
             )
-            if install_weight_sync_tensor is not None:
-                install_weight_sync_tensor()
-                has_weight_sync_modules = True
-        if has_weight_sync_modules:
-            # Reclaim memory released by _install_weight_sync_tensor before vLLM
-            # allocates its CUDA-graph private pools.
-            torch.cuda.empty_cache()
+            is not None
+        ]
+        if not installers:
+            return
+
+        self._weight_sync_state_dict_metadata = {
+            name: (tensor.size(), tensor.stride(), tensor.dtype, tensor.device)
+            for name, tensor in self.model.state_dict().items()
+            if isinstance(tensor, torch.Tensor)
+        }
+        for install in installers:
+            install()
+
+        # Reclaim memory released by the installers before vLLM allocates its
+        # CUDA-graph private pools.
+        torch.cuda.empty_cache()
+
+    def weight_sync_state_dict(self) -> dict[str, torch.Tensor]:
+        """Allocate transient high-precision destinations for a weight pull.
+
+        The model's normal state-dict hooks may need to read parameters, for
+        example to split fused QKV weights. Cached inference weights no longer
+        have high-precision storage, so retain only the exposed state-dict
+        metadata before installing them and materialize fresh pull buffers here.
+        ``load_state_dict`` consumes and releases these buffers after rebuilding
+        the cached representations.
+        """
+        metadata = self._weight_sync_state_dict_metadata
+        if metadata is None:
+            return self.model.state_dict()
+        return {
+            name: torch.empty_strided(size, stride, dtype=dtype, device=device)
+            for name, (size, stride, dtype, device) in metadata.items()
+        }
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

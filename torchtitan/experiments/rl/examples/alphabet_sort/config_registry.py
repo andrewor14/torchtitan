@@ -18,6 +18,7 @@ from renderers import GptOssRendererConfig, Qwen3RendererConfig
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -205,6 +206,19 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_flex_mxfp8() -> Controller.Config:
+    """Qwen3-0.6B flex-attention GRPO with MXFP8 transformer linears."""
+    config = rl_grpo_qwen3_0_6b_flex()
+    config.compile = CompileConfig(enable=False)
+    config.model_spec = _qwen3_rl_model_registry(
+        "0.6B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="flex",
+        converters=[MXFP8LinearConverter.Config(fqns=["layers."])],
+    )
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:

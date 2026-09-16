@@ -71,9 +71,16 @@ export TORCHSTORE_LOG_LEVEL="INFO"
 
 # Other configs
 export VLLM_USE_FLASHINFER_SAMPLER=0
-export HF_HUB_OFFLINE=0
-export HF_DATASETS_OFFLINE=0
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"
 export WANDB_MODE="disabled"
+
+# This PyTorch build's native CuTeDSL RMSNorm backward has an inconsistent
+# generated wrapper signature on the g3 nodes. Keep MXFP8's torchao kernels
+# enabled while falling back to ATen for the unrelated native JIT overrides.
+if [[ "$CONFIG" == *"mxfp8"* ]]; then
+  export TORCH_DISABLE_NATIVE_JIT="${TORCH_DISABLE_NATIVE_JIT:-1}"
+fi
 
 # Submit from RUN_DIR so SLURM writes stdout and stderr there
 original_dir=$PWD

@@ -47,6 +47,7 @@ _WEIGHT_SYNC_VIEW_OPS = {
 }
 
 _WEIGHT_SYNC_FACTORY_OPS = {
+    torch.ops.aten._to_copy.default,
     torch.ops.aten.empty_like.default,
     torch.ops.aten.new_zeros.default,
     torch.ops.aten.zeros_like.default,
@@ -149,10 +150,18 @@ class _WeightSyncTensor(torch.Tensor):
                 if source._operands is not weight_sync_tensor._operands:
                     raise RuntimeError("copy mixed weight sync tensor operands")
                 return weight_sync_tensor
-            if source.device != weight_sync_tensor.device:
-                source = source.to(weight_sync_tensor.device)
+            source = source.to(weight_sync_tensor.device)
             weight_sync_tensor.refill_from_tensor(source)
             return weight_sync_tensor
+
+        if func is torch.ops.aten._to_copy.default:
+            # vLLM records reload metadata with param.data.to("meta"). This
+            # conversion needs only the logical metadata, not the weight values.
+            target_device = (kwargs or {}).get("device")
+            if target_device is None or torch.device(target_device).type != "meta":
+                raise RuntimeError(
+                    "a storage-free weight sync tensor can only be copied to meta"
+                )
 
         template = None
 

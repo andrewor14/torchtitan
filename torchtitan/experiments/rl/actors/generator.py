@@ -1358,7 +1358,7 @@ class VLLMGenerator(Actor, Configurable):
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
-        model_sd = model.model.state_dict()
+        model_sd = model.weight_sync_state_dict()
         if get_spmd_backend() == "spmd_types":
             await self._get_spmd_state_dict(model_sd, model=model)
         elif self.config.manual_cpu_stage_weight_sync:

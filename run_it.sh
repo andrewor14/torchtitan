@@ -71,9 +71,15 @@ export TORCHSTORE_LOG_LEVEL="INFO"
 
 # Other configs
 export VLLM_USE_FLASHINFER_SAMPLER=0
-export HF_HUB_OFFLINE=0
-export HF_DATASETS_OFFLINE=0
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"
 export WANDB_MODE="disabled"
+
+if [[ "$CONFIG" == *"mxfp8"* ]]; then
+  # This cluster image's native CuTeDSL RMSNorm override has an incompatible
+  # backward signature. MXFP8's TorchAO kernels remain enabled.
+  export TORCH_DISABLE_NATIVE_JIT="${TORCH_DISABLE_NATIVE_JIT:-1}"
+fi
 
 # Submit from RUN_DIR so SLURM writes stdout and stderr there
 original_dir=$PWD

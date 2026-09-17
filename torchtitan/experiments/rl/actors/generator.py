@@ -34,7 +34,6 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
@@ -925,7 +924,7 @@ class VLLMGenerator(Actor, Configurable):
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
-        # FA2 requires block_size to be a multiple of 256
+        # FA2 requires block_size to be a multiple of 256.
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
         expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
@@ -1001,6 +1000,9 @@ class VLLMGenerator(Actor, Configurable):
             )
 
         self.policy_version = 0
+        self._num_engine_steps_since_weight_sync = 0
+        self._num_weight_syncs = 0
+        self._quantize_kernel_calls_after_last_sync: int | None = None
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1234,6 +1236,7 @@ class VLLMGenerator(Actor, Configurable):
                         with torch.no_grad():
                             with sl.log_trace_span("vllm_engine_step"):
                                 request_outputs = self._engine.step()
+                        self._num_engine_steps_since_weight_sync += 1
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1358,6 +1361,34 @@ class VLLMGenerator(Actor, Configurable):
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
+        (
+            num_cached_weights,
+            quantize_kernel_calls_before,
+        ) = model.get_mxfp8_weight_quantization_stats()
+        if num_cached_weights:
+            quantize_kernel_calls_during_reuse = (
+                0
+                if self._quantize_kernel_calls_after_last_sync is None
+                else quantize_kernel_calls_before
+                - self._quantize_kernel_calls_after_last_sync
+            )
+            logger.info(
+                "MXFP8 cache reuse before weight sync %d: cached_weights=%d, "
+                "engine_steps=%d, cached_weight_uses=%d, reuses_per_weight=%d, "
+                "weight_quantize_kernel_calls_during_reuse=%d",
+                self._num_weight_syncs + 1,
+                num_cached_weights,
+                self._num_engine_steps_since_weight_sync,
+                num_cached_weights * self._num_engine_steps_since_weight_sync,
+                self._num_engine_steps_since_weight_sync,
+                quantize_kernel_calls_during_reuse,
+            )
+            if quantize_kernel_calls_during_reuse:
+                raise RuntimeError(
+                    "MXFP8 cached weights must not be quantized between weight "
+                    f"syncs, but observed {quantize_kernel_calls_during_reuse} calls"
+                )
+        model.prepare_weight_sync()
         model_sd = model.model.state_dict()
         if get_spmd_backend() == "spmd_types":
             await self._get_spmd_state_dict(model_sd, model=model)
@@ -1396,6 +1427,35 @@ class VLLMGenerator(Actor, Configurable):
         # harmless self-copy; only the fused wqkv is actually rebuilt.
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
         model.model.load_state_dict(model_sd, strict=False)
+        model.finish_weight_sync()
+        (
+            num_cached_weights_after,
+            quantize_kernel_calls_after,
+        ) = model.get_mxfp8_weight_quantization_stats()
+        if num_cached_weights_after:
+            assert num_cached_weights_after == num_cached_weights
+            num_quantize_kernel_calls = (
+                quantize_kernel_calls_after - quantize_kernel_calls_before
+            )
+            logger.info(
+                "MXFP8 weight sync %d: cached_weights=%d, "
+                "weight_quantize_kernel_calls=%d, calls_per_cached_weight=%.1f",
+                self._num_weight_syncs + 1,
+                num_cached_weights_after,
+                num_quantize_kernel_calls,
+                num_quantize_kernel_calls / num_cached_weights_after,
+            )
+            if num_quantize_kernel_calls != num_cached_weights_after:
+                raise RuntimeError(
+                    "MXFP8 weight sync must call the quantization kernel once per "
+                    f"cached weight, but observed {num_quantize_kernel_calls} calls "
+                    f"for {num_cached_weights_after} weights"
+                )
+            self._quantize_kernel_calls_after_last_sync = (
+                quantize_kernel_calls_after
+            )
+        self._num_weight_syncs += 1
+        self._num_engine_steps_since_weight_sync = 0
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
@@ -1417,10 +1477,9 @@ class VLLMGenerator(Actor, Configurable):
     async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
         """Fetch trainer-pushed weights into a spmd_types generator state dict.
 
-        spmd_types generators hold plain local tensors, but TorchStore already
-        knows how to fill DTensor state-dict entries. Wrap each local tensor as
-        a DTensor using its declared SPMD layout, fetch through the normal
-        state-dict path, then put the local tensors back before load_state_dict.
+        TorchStore fills DTensor state-dict entries. Wrap the receive tensors
+        using their declared SPMD layouts and preserve those wrappers for the
+        persistent FSDP sharded parameters and fused-parameter load hooks.
         """
 
         dtensor_model_sd = plain_tensor_to_dtensor_state_dict(
@@ -1436,7 +1495,10 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=False,
         )
 
-        model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
+        # FSDP's persistent sharded parameters contain DTensor storage. Keep the
+        # transfer wrappers so load_state_dict and fused-parameter merge hooks
+        # operate DTensor-to-DTensor.
+        model_sd.update(dtensor_model_sd)
 
     @concurrent_endpoint
     async def close(self) -> None:
@@ -1451,6 +1513,28 @@ class VLLMGenerator(Actor, Configurable):
         while Monarch is also trying to stop the same actor mesh, so this endpoint only closes
         renderer-local resources and leaves process teardown to `ProcMesh.stop()`.
         """
+        model = self._get_model()
+        num_cached_weights, quantize_kernel_calls = (
+            model.get_mxfp8_weight_quantization_stats()
+        )
+        if num_cached_weights:
+            quantize_kernel_calls_during_reuse = (
+                0
+                if self._quantize_kernel_calls_after_last_sync is None
+                else quantize_kernel_calls
+                - self._quantize_kernel_calls_after_last_sync
+            )
+            logger.info(
+                "MXFP8 final cache reuse: cached_weights=%d, engine_steps=%d, "
+                "cached_weight_uses=%d, reuses_per_weight=%d, "
+                "weight_quantize_kernel_calls_during_reuse=%d",
+                num_cached_weights,
+                self._num_engine_steps_since_weight_sync,
+                num_cached_weights * self._num_engine_steps_since_weight_sync,
+                self._num_engine_steps_since_weight_sync,
+                quantize_kernel_calls_during_reuse,
+            )
+
         if self._rank == 0:
             async with self._engine_loop_condition:
                 self._close_request = CloseRequest()

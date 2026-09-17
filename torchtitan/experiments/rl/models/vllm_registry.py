@@ -54,18 +54,15 @@ class InferenceParallelismConfig:
     :class:`~torchtitan.config.ParallelismConfig`.
 
     Not specific to RL: any vLLM-based inference path (the RL generator or
-    standalone inference) uses it. Inference replicates parameters across pure
-    data-parallel groups (the vLLM wrapper skips FSDP/DDP), so
-    ``data_parallel_degree`` is vLLM's pure DP size, not the trainer's
-    ``data_parallel_shard_degree`` (FSDP). The vLLM wrapper translates this to
-    the training ``ParallelismConfig`` via :meth:`to_training`
-    before building ``ParallelDims``; other utils (e.g. world-size calc) call it
-    too.
+    standalone inference) uses it. ``data_parallel_degree`` is represented as
+    TorchTitan FSDP, including the useful singleton case where there is no
+    sharding or communication. The vLLM wrapper translates this to the training
+    ``ParallelismConfig`` via :meth:`to_training` before building
+    ``ParallelDims``; other utils (e.g. world-size calc) call it too.
     """
 
     data_parallel_degree: int = 1
-    """vLLM pure data-parallel degree; parameters are replicated across these
-    groups. 1 means disabled."""
+    """Generator FSDP degree. 1 keeps full parameters on each generator."""
 
     tensor_parallel_degree: int = 1
     """Tensor parallelism degree. 1 means disabled."""
@@ -108,6 +105,9 @@ class InferenceParallelismConfig:
             pipeline_parallel_degree=1,
             enable_sequence_parallel=self.enable_sequence_parallel,
             spmd_backend=self.spmd_backend,
+            # Inference reuses an unsharded compute representation until the
+            # next weight sync instead of rebuilding it for every forward.
+            fsdp_reshard_after_forward="never",
         )
 
 

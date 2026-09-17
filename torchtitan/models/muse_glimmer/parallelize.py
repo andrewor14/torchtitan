@@ -36,7 +36,6 @@ def parallelize_muse_glimmer(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
-    skip_dp: bool = False,
 ):
     if parallelism.spmd_backend != "spmd_types":
         raise NotImplementedError(
@@ -90,12 +89,6 @@ def parallelize_muse_glimmer(
                 compile_config=compile_config,
                 parallel_dims=parallel_dims,
             )
-
-    # Skip FSDP wrapper for inference. FSDP's forward hooks
-    # are incompatible with torch.inference_mode() used by vLLM.
-    # AC and compile are disabled via config (mode="none", enable=False).
-    if skip_dp:
-        return model
 
     dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 

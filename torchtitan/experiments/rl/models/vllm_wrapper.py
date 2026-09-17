@@ -20,10 +20,12 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from torch.distributed._composable.fsdp import FSDPModule
 from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.quantization.mxfp8 import MXFP8Linear
 from torchtitan.config import (
     apply_overrides,
     CompileConfig,
@@ -311,8 +313,9 @@ class VLLMModelWrapper(Module):
         training_parallelism = parallelism.to_training()
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
-        # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
-        # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
+        # sharding sees the same mesh shape as vLLM. When inference FSDP is
+        # disabled, data_parallel_shard_degree carries vLLM's pure DP rather
+        # than TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
             dp_replicate=training_parallelism.data_parallel_replicate_degree,
             dp_shard=training_parallelism.data_parallel_shard_degree,
@@ -374,12 +377,14 @@ class VLLMModelWrapper(Module):
             compile_config=compile_config,
             ac_config=None,
             dump_folder="",
-            # Generator inference replicates parameters across vLLM DP groups.
-            # Keep TP/EP sharding above, but do not translate dp_shard into
-            # TorchTitan FSDP/DDP here.
-            skip_dp=True,
         )
-
+        # vLLM calls compute_logits separately. Enter the decoder's forward
+        # here so its root FSDP state owns all nested FSDP modules, while
+        # leaving the LM head for compute_logits.
+        self.model._skip_lm_head = True
+        self._fsdp_modules = tuple(
+            module for module in self.model.modules() if isinstance(module, FSDPModule)
+        )
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
 
@@ -410,6 +415,82 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+    def prepare_weight_sync(self) -> None:
+        """Expose sharded parameters without releasing captured compute storage."""
+        with torch.inference_mode(False), torch.no_grad():
+            for module in self._fsdp_modules:
+                state = module._get_fsdp_state()
+                for param_group in state._fsdp_param_groups:
+                    if param_group.is_sharded:
+                        continue
+                    assert param_group.is_unsharded
+                    # The normal state-dict pre-hook calls to_sharded(), which
+                    # frees the unsharded storage. CUDA graphs retain pointers
+                    # to that storage, so install the persistent parameters
+                    # without freeing it. The next unshard refills it in place.
+                    for fsdp_param in param_group.fsdp_params:
+                        fsdp_param._setattr_on_modules(fsdp_param.sharded_param)
+                        fsdp_param.sharded_state = type(
+                            fsdp_param.sharded_state
+                        ).SHARDED
+                    param_group._sharded_state = type(
+                        param_group._sharded_state
+                    ).SHARDED
+
+    def finish_weight_sync(self) -> None:
+        """Refill the existing FSDP compute storage with synchronized weights."""
+        # vLLM creates the compute storage during inference-mode graph capture,
+        # so FSDP must also refill those inference tensors in inference mode.
+        num_sharded_groups = 0
+        num_extension_params = 0
+        seen_param_groups: set[int] = set()
+        for module in self._fsdp_modules:
+            state = module._get_fsdp_state()
+            for param_group in state._fsdp_param_groups:
+                if id(param_group) in seen_param_groups:
+                    continue
+                seen_param_groups.add(id(param_group))
+                num_sharded_groups += int(param_group.is_sharded)
+                num_extension_params += sum(
+                    hasattr(fsdp_param._sharded_local_tensor, "fsdp_post_all_gather")
+                    for fsdp_param in param_group.fsdp_params
+                )
+        _, operand_builds_before = self.get_mxfp8_weight_quantization_stats()
+        with torch.inference_mode():
+            for module in self._fsdp_modules:
+                module.unshard()
+        logger.info(
+            "FSDP weight sync unshard: sharded_groups=%d, extension_params=%d, "
+            "operand_builds=%d",
+            num_sharded_groups,
+            num_extension_params,
+            self.get_mxfp8_weight_quantization_stats()[1]
+            - operand_builds_before,
+        )
+
+    def get_mxfp8_weight_quantization_stats(self) -> tuple[int, int]:
+        """Return cached weight and cumulative quantization-kernel counts."""
+        num_cached_weights = sum(
+            isinstance(module, MXFP8Linear) for module in self.model.modules()
+        )
+        quantization_classes: set[type] = set()
+        seen_param_groups: set[int] = set()
+        for module in self._fsdp_modules:
+            state = module._get_fsdp_state()
+            for param_group in state._fsdp_param_groups:
+                if id(param_group) in seen_param_groups:
+                    continue
+                seen_param_groups.add(id(param_group))
+                for fsdp_param in param_group.fsdp_params:
+                    wrapper_type = type(fsdp_param._sharded_local_tensor)
+                    if hasattr(wrapper_type, "_num_weight_quantizations"):
+                        quantization_classes.add(wrapper_type)
+        num_quantizations = sum(
+            wrapper_type._num_weight_quantizations
+            for wrapper_type in quantization_classes
+        )
+        return num_cached_weights, num_quantizations
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
@@ -466,14 +547,11 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.spmd_context():
-            # Get embeddings
-            h = self.model.tok_embeddings(input_ids)
-
-            # Pass through transformer layers
-            for layer in self.model.layers.values():
-                h = layer(h, attention_masks=None, positions=positions)
-
-            h = self.model.norm(h)
+            h = self.model(
+                input_ids,
+                attention_masks=None,
+                positions=positions,
+            )
         # Inference disables sequence parallelism, so final hidden states should
         # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):

@@ -13,6 +13,7 @@ import torch
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
+    restore_flash_attention_impl,
     sdpa_kernel,
     SDPBackend,
 )
@@ -24,7 +25,7 @@ from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
@@ -54,6 +55,21 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
         # vLLM requires any custom attention backend to return "CUSTOM" as its
         # name so the backend registry can look it up correctly.
         return "CUSTOM"
+
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        # vLLM detects its FA4 head-dim-256 kernel and otherwise selects a
+        # 128-token page. This backend falls back to PyTorch's FA2 for that
+        # shape, whose paged-KV kernel requires a multiple of 256.
+        if cls._get_fa4_hd256_block_size() is not None:
+            return [MultipleOf(256)]
+        return super().get_supported_kernel_block_sizes()
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if cls._get_fa4_hd256_block_size() is not None:
+            return max(default_block_size, 256)
+        return super().get_preferred_block_size(default_block_size)
 
     @staticmethod
     def get_impl_cls():
@@ -87,6 +103,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
         flash_attention_impl = get_cuda_flash_attention_impl()
+        use_fa2_for_paged_kv = (
+            flash_attention_impl == "FA4" and self.head_size == 256
+        )
+        # FA4's SM100 head-dim-256 forward rejects the seqused tensors needed
+        # by vLLM's paged KV cache. PyTorch's built-in FA2 supports that case.
+        if use_fa2_for_paged_kv:
+            restore_flash_attention_impl(_raise_warn=False)
+            flash_attention_impl = None
         if flash_attention_impl is not None:
             # activate_flash_attention_impl() will restore internal global state
             # and re-run register function, so we want to only call it once.
@@ -100,10 +124,17 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                         f"{capability[0]}.{capability[1]}, but activation failed."
                     ) from error
         else:
-            warn_once(
-                logger,
-                "FA3/FA4 not available on this CUDA architecture, falling back to FA2. ",
-            )
+            if use_fa2_for_paged_kv:
+                warn_once(
+                    logger,
+                    "FA4 does not support paged KV cache metadata with head "
+                    "dimension 256; falling back to FA2.",
+                )
+            else:
+                warn_once(
+                    logger,
+                    "FA3/FA4 not available on this CUDA architecture, falling back to FA2.",
+                )
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py

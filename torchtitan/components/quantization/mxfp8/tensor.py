@@ -89,12 +89,15 @@ class _LinearShardedTensorWithMXFP8Compute(_ShardedFSDPTensor):
     holder is generic, so quantization is the only thing a format supplies.
     """
 
+    _num_weight_quantizations = 0
+
     def _build_operands(
         self,
         logical_tensor: torch.Tensor,
         out: _MXFP8LinearOperands | None = None,
     ) -> _MXFP8LinearOperands:
         operands = _quantize_mxfp8_weight(logical_tensor)
+        type(self)._num_weight_quantizations += 1
         if out is None:
             return operands
         out.weight_qdata_dgrad_NK.copy_(operands.weight_qdata_dgrad_NK)

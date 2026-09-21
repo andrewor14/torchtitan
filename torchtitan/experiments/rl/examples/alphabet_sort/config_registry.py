@@ -18,6 +18,7 @@ from renderers import GptOssRendererConfig, Qwen3RendererConfig
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -205,6 +206,19 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_flex_mxfp8_fsdp() -> Controller.Config:
+    """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
+    config = rl_grpo_qwen3_0_6b_flex()
+    config.compile = CompileConfig(enable=False)
+    config.model_spec = _qwen3_rl_model_registry(
+        "0.6B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="flex",
+        converters=[MXFP8LinearConverter.Config(fqns=["layers."])],
+    )
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
@@ -1181,5 +1195,31 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             tensor_parallel_degree=4,
         ),
         override=OverrideConfig(imports=list(perf_imports)),
+    )
+    return config
+
+
+def rl_grpo_qwen3_6_27b_varlen_perf_mxfp8_fsdp() -> Controller.Config:
+    """Qwen3.6-27B perf config with FSDP-managed MXFP8 inference weights."""
+    config = rl_grpo_qwen3_6_27b_varlen_perf()
+    config.model_spec = _qwen3_5_rl_model_registry(
+        "27B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="varlen",
+        converters=[
+            # Leave delta_net.in_proj_a/b in BF16: their 48-wide output is not
+            # divisible by MXFP8's 32-element block size.
+            MXFP8LinearConverter.Config(
+                fqns=[
+                    "attention.",
+                    "feed_forward.",
+                    "delta_net.in_proj_q",
+                    "delta_net.in_proj_k",
+                    "delta_net.in_proj_v",
+                    "delta_net.in_proj_z",
+                    "delta_net.out_proj",
+                ]
+            )
+        ],
     )
     return config

@@ -20,6 +20,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from torch.distributed._composable.fsdp import FSDPModule
 from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate, Shard
@@ -311,8 +312,9 @@ class VLLMModelWrapper(Module):
         training_parallelism = parallelism.to_training()
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
-        # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
-        # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
+        # sharding sees the same mesh shape as vLLM. When inference FSDP is
+        # disabled, data_parallel_shard_degree carries vLLM's pure DP rather
+        # than TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
             dp_replicate=training_parallelism.data_parallel_replicate_degree,
             dp_shard=training_parallelism.data_parallel_shard_degree,
@@ -374,12 +376,14 @@ class VLLMModelWrapper(Module):
             compile_config=compile_config,
             ac_config=None,
             dump_folder="",
-            # Generator inference replicates parameters across vLLM DP groups.
-            # Keep TP/EP sharding above, but do not translate dp_shard into
-            # TorchTitan FSDP/DDP here.
-            skip_dp=True,
         )
-
+        # vLLM calls compute_logits separately. Enter the decoder's forward
+        # here so its root FSDP state owns all nested FSDP modules, while
+        # leaving the LM head for compute_logits.
+        self.model._skip_lm_head = True
+        self._fsdp_modules = tuple(
+            module for module in self.model.modules() if isinstance(module, FSDPModule)
+        )
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
 
@@ -410,6 +414,30 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+    def prepare_weight_sync(self) -> None:
+        """Expose sharded parameters without releasing captured compute storage."""
+        with torch.inference_mode(False), torch.no_grad():
+            # Explicit reshard() observes the forward policy. Temporarily
+            # enable it so RAF=False inference modules actually transition to
+            # their persistent parameters, while retaining the compute storage
+            # whose addresses were captured by CUDA graphs.
+            for module in self._fsdp_modules:
+                module.set_reshard_after_forward(True, recurse=False)
+                try:
+                    module.reshard(free_unsharded=False)
+                finally:
+                    module.set_reshard_after_forward(False, recurse=False)
+
+    def finish_weight_sync(self) -> None:
+        """Refill the existing FSDP compute storage with synchronized weights."""
+        # vLLM creates the compute storage during inference-mode graph capture,
+        # so FSDP must also refill those inference tensors in inference mode.
+        with torch.inference_mode():
+            for module in self._fsdp_modules:
+                module.unshard()
+        # TODO: Free the persistent BF16 sharded storage after unshard builds
+        # the MXFP8 operands, and reallocate it before the next weight sync.
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
@@ -466,14 +494,11 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.spmd_context():
-            # Get embeddings
-            h = self.model.tok_embeddings(input_ids)
-
-            # Pass through transformer layers
-            for layer in self.model.layers.values():
-                h = layer(h, attention_masks=None, positions=positions)
-
-            h = self.model.norm(h)
+            h = self.model(
+                input_ids,
+                attention_masks=None,
+                positions=positions,
+            )
         # Inference disables sequence parallelism, so final hidden states should
         # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):

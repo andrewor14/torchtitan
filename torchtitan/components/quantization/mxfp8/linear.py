@@ -365,6 +365,21 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
+    def parallelize(self, parallel_dims) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        # TODO: isolate this into a separate fix, also affects training
+        super().parallelize(parallel_dims)
+        if isinstance(self.weight, _LinearShardedTensorWithMXFP8Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithMXFP8Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Always a plain tensor: the weight is only re-wrapped as a DTensor on
         # a non-data-parallel mesh under partial_dtensor, which Config.build

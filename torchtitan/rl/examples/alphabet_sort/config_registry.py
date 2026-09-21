@@ -32,6 +32,7 @@ from torchtitan.config.transform import (
     LMHeadCastConverter,
     ModelConfigConverter,
     ModelConfigTransformContext,
+    MXFP8LinearConverter,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -252,6 +253,18 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
+    """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
+    config = rl_grpo_qwen3_0_6b_varlen()
+    config.compile = None
+    # TODO: Allow LMHeadCastConverter and QuantizationConverter to
+    # co-exist, since they target different layers
+    config.model = (
+        MXFP8LinearConverter.Config(fqns=["layers."]).build().convert(config.model)
+    )
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
@@ -1379,5 +1392,30 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             tensor_parallel_degree=4,
         ),
         override=OverrideConfig(imports=list(perf_imports)),
+    )
+    return config
+
+
+def rl_grpo_qwen3_6_27b_varlen_perf_mxfp8() -> Controller.Config:
+    """Qwen3.6-27B performance config with MXFP8 linear layers."""
+    config = rl_grpo_qwen3_6_27b_varlen_perf()
+    # TODO: Allow LMHeadCastConverter and QuantizationConverter to
+    # co-exist, since they target different layers
+    config.model = (
+        MXFP8LinearConverter.Config(
+            # in_proj_a/b have 48-wide outputs, which are not divisible by the
+            # MXFP8 block size.
+            fqns=[
+                "attention.",
+                "feed_forward.",
+                "delta_net.in_proj_q",
+                "delta_net.in_proj_k",
+                "delta_net.in_proj_v",
+                "delta_net.in_proj_z",
+                "delta_net.out_proj",
+            ]
+        )
+        .build()
+        .convert(config.model)
     )
     return config

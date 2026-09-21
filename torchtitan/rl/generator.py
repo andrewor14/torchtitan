@@ -30,10 +30,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-)
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
@@ -1001,16 +997,15 @@ class VLLMGenerator(Configurable):
         self._prefetched_model_state_dict: dict[str, Any] | None = None
         if config.enable_cpu_weight_prefetch:
             model = self._get_model()
-            model_sd = plain_tensor_to_dtensor_state_dict(
-                model.model.state_dict(),
-                state_dict_layouts=model.get_state_dict_layouts(),
-                parallelism_context=model.parallelism_context,
-            )
+            model.prepare_weight_sync()
+            model_sd = model.model.state_dict()
             # Preserve the DTensor layouts while replacing their local storage
             # with persistent pinned CPU buffers.
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                model_sd, pin_memory=True
-            )
+            with torch.device("cpu"):
+                self._prefetched_model_state_dict = _create_cpu_state_dict(
+                    model_sd, pin_memory=True
+                )
+            model.finish_weight_sync()
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1373,8 +1368,19 @@ class VLLMGenerator(Configurable):
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
-        model_sd = model.model.state_dict()
-        await self._get_spmd_state_dict(model_sd, model=model)
+        model_sd: dict[str, Any] | None = None
+        if self.config.enable_cpu_weight_prefetch:
+            assert self._prefetched_model_state_dict is not None
+            model_sd = self._prefetched_model_state_dict
+        model.prepare_weight_sync()
+        if model_sd is None:
+            model_sd = model.model.state_dict()
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=model_sd,
+                strict=False,
+                direct_rdma=False,
+            )
         # Fused grouped experts still expose hook-produced w1/w3 copies, so the
         # in-place fill above does not reach their physical w13 parameter.
         # Re-apply the state dict to run that module's merge hook. Other params,
@@ -1382,6 +1388,7 @@ class VLLMGenerator(Configurable):
         # With CPU prefetch, model_sd instead contains the prefetched CPU tensors,
         # and this load performs the local CPU-to-GPU copy.
         model.model.load_state_dict(model_sd, strict=False)
+        model.finish_weight_sync()
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
@@ -1399,36 +1406,6 @@ class VLLMGenerator(Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
-
-    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
-        """Fetch trainer-pushed weights into a spmd_types generator state dict.
-
-        spmd_types generators hold plain local tensors, but TorchStore already
-        knows how to fill DTensor state-dict entries. Wrap each local tensor as
-        a DTensor using its declared SPMD layout, fetch through the normal
-        state-dict path, then put the local tensors back before load_state_dict.
-
-        With CPU weight prefetch enabled, use the previously fetched DTensor
-        state dict instead.
-        """
-        if self.config.enable_cpu_weight_prefetch:
-            assert self._prefetched_model_state_dict is not None
-            dtensor_model_sd = self._prefetched_model_state_dict
-        else:
-            dtensor_model_sd = plain_tensor_to_dtensor_state_dict(
-                model_sd,
-                state_dict_layouts=model.get_state_dict_layouts(),
-                parallelism_context=model.parallelism_context,
-            )
-
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=dtensor_model_sd,
-                strict=False,
-                direct_rdma=False,
-            )
-
-        model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.

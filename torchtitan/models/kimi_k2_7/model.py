@@ -128,7 +128,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> KimiK25Model:
         if parallelism_context.cp_enabled:
             raise NotImplementedError(
@@ -143,7 +142,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(

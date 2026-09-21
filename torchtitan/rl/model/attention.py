@@ -7,7 +7,9 @@
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
+
+import spmd_types as spmd
 
 import torch
 from torch.nn.attention import (
@@ -16,6 +18,8 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_axes
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
@@ -305,6 +309,12 @@ class VLLMAttentionWrapper(Module):
     # where layers are built on different ranks.
     _layer_counter: itertools.count = itertools.count()
     _module_protocol_exempt_children = frozenset({"vllm_attn"})
+    vllm_attn_scale_buffer_names: ClassVar[tuple[str, ...]] = (
+        "_k_scale",
+        "_prob_scale",
+        "_q_scale",
+        "_v_scale",
+    )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -383,6 +393,29 @@ class VLLMAttentionWrapper(Module):
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
             **diff_kv_kwargs,
         )
+
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        super()._parallelize(parallelism_context)
+        assert self._sharding_config is not None
+
+        # vllm_attn is exempt from the Module protocol, so annotate its state
+        # from the dotted declarations added by _replace_vllm_layer_configs
+        for buffer_name in self.vllm_attn_scale_buffer_names:
+            state_name = f"vllm_attn.{buffer_name}"
+            layout = self._sharding_config.state_shardings.get(state_name)
+            if layout is None:
+                raise ValueError(
+                    f"{type(self).__name__}.{state_name} has no placement "
+                    "declared in sharding_config.state_shardings."
+                )
+            mesh = parallelism_context.get_optional_mesh(
+                [axis.value for axis in spmd_axes(layout)],
+                include_singleton_axes=True,
+            )
+            assert mesh is not None
+            buffer = getattr(self.vllm_attn, buffer_name)
+            with set_current_spmd_mesh(mesh):
+                spmd.assert_type(buffer, layout)
 
     def forward(
         self,

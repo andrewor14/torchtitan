@@ -197,6 +197,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig | None,
     checkpointer_config: CheckpointManager.Config | None,
+    enable_cpu_weight_prefetch: bool = False,
     override: OverrideConfig,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
@@ -229,6 +230,8 @@ def register_to_vllm(
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
+        enable_cpu_weight_prefetch: Allocate pinned CPU buffers for weight sync
+            during model initialization.
         override: Config overrides applied to the generator's model config before
             model finalization and build (empty ``OverrideConfig`` for no overrides).
     """
@@ -254,6 +257,7 @@ def register_to_vllm(
                 parallelism=parallelism,
                 compile_config=compile_config,
                 checkpointer_config=checkpointer_config,
+                enable_cpu_weight_prefetch=enable_cpu_weight_prefetch,
                 vllm_config=vllm_config,
                 prefix=prefix,
                 override=override,

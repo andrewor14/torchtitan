@@ -20,7 +20,6 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -850,6 +849,7 @@ class VLLMGenerator(Configurable):
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpointer_config=config.checkpointer,
+            enable_cpu_weight_prefetch=config.enable_cpu_weight_prefetch,
             override=config.override,
         )
 
@@ -997,15 +997,8 @@ class VLLMGenerator(Configurable):
         self._prefetched_model_state_dict: dict[str, Any] | None = None
         if config.enable_cpu_weight_prefetch:
             model = self._get_model()
-            model.prepare_weight_sync()
-            model_sd = model.model.state_dict()
-            # Preserve the DTensor layouts while replacing their local storage
-            # with persistent pinned CPU buffers.
-            with torch.device("cpu"):
-                self._prefetched_model_state_dict = _create_cpu_state_dict(
-                    model_sd, pin_memory=True
-                )
-            model.finish_weight_sync()
+            assert model._prefetched_model_state_dict is not None
+            self._prefetched_model_state_dict = model._prefetched_model_state_dict
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions

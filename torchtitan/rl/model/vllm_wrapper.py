@@ -20,6 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
+from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
@@ -249,6 +250,7 @@ class VLLMModelWrapper(Module):
         parallelism: InferenceParallelismConfig,
         compile_config: CompileConfig | None,
         checkpointer_config: CheckpointManager.Config | None,
+        enable_cpu_weight_prefetch: bool,
         vllm_config: VllmConfig,
         prefix: str = "",
         override: OverrideConfig,
@@ -329,6 +331,17 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+        # Build optional pinned CPU receive buffers, then switch FSDP to its
+        # inference representation before vLLM profiles GPU memory
+        self.prepare_weight_sync()
+        self._prefetched_model_state_dict: dict[str, object] | None = None
+        if enable_cpu_weight_prefetch:
+            with torch.device("cpu"):
+                self._prefetched_model_state_dict = _create_cpu_state_dict(
+                    self.model.state_dict(), pin_memory=True
+                )
+        self.finish_weight_sync()
 
     def prepare_weight_sync(self) -> None:
         """

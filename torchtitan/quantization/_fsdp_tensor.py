@@ -185,6 +185,11 @@ _FSDP_UNSHARDED_FACTORY_OPS = {
     torch.ops.aten.zeros_like.default,
 }
 
+_FSDP_UNSHARDED_META_OPS = {
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten.to.dtype_layout,
+}
+
 
 def _unsharded_inner_tensor_names(operands_cls: type) -> tuple[str, ...]:
     """Return the names of the unsharded inner tensors an operands dataclass owns."""
@@ -578,6 +583,10 @@ class _UnshardedFSDPTensor(_FSDPTensorBase):
             cls, unwrap, (original_args, original_kwargs)
         )
         assert template is not None
+        if func in _FSDP_UNSHARDED_META_OPS:
+            device = kwargs.get("device")
+            if device is not None and torch.device(device).type == "meta":
+                return func(*args, **kwargs)
         if func in _FSDP_UNSHARDED_FACTORY_OPS:
             kwargs["device"] = template.device
             return func(*args, **kwargs)

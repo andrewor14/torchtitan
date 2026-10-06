@@ -30,6 +30,7 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -70,14 +71,10 @@ def _replace_vllm_layer_configs(model_config):
             # vLLM adds scalar attention-scale buffers absent from the trainer
             # module, and every dense-mesh rank needs a complete copy
             replicated_dense = dense_param_placement(tp=spmd.R)
-            vllm_attention_sharding = dataclasses.replace(
-                attention_sharding,
+            vllm_attn_sharding = ShardingConfig(
                 state_shardings={
-                    **attention_sharding.state_shardings,
-                    **{
-                        f"vllm_attn.{name}": replicated_dense
-                        for name in VLLMAttentionWrapper.vllm_attn_scale_buffer_names
-                    },
+                    name: replicated_dense
+                    for name in VLLMAttentionWrapper.vllm_attn_scale_buffer_names
                 },
             )
             vllm_attention_cfg = VLLMAttentionWrapper.Config(
@@ -87,7 +84,8 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim=head_dim,
                 value_head_dim=value_head_dim,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
-                sharding_config=vllm_attention_sharding,
+                sharding_config=attention_sharding,
+                vllm_attn_sharding_config=vllm_attn_sharding,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
@@ -132,6 +130,7 @@ def _replace_vllm_layer_configs(model_config):
                 conv_kernel_size=kda_cfg.conv_kernel_size,
                 lower_bound=kda_cfg.inner_kda.kernel.lower_bound,
                 layer_index=layer_idx,
+                sharding_config=kda_cfg.inner_kda.sharding_config,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,

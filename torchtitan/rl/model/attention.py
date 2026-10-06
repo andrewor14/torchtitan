@@ -9,8 +9,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import spmd_types as spmd
-
 import torch
 from torch.nn.attention import (
     activate_flash_attention_impl,
@@ -18,11 +16,10 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_axes
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -293,6 +290,10 @@ class TorchTitanVarlenInnerAttentionDiffKVImpl(TorchTitanVarlenInnerAttentionImp
         )
 
 
+class _VLLMAttention(Attention, Module):
+    """vLLM attention that participates in the TorchTitan Module protocol."""
+
+
 class VLLMAttentionWrapper(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
@@ -308,7 +309,6 @@ class VLLMAttentionWrapper(Module):
     # global counter. The counter breaks with pipeline parallelism
     # where layers are built on different ranks.
     _layer_counter: itertools.count = itertools.count()
-    _module_protocol_exempt_children = frozenset({"vllm_attn"})
     vllm_attn_scale_buffer_names: ClassVar[tuple[str, ...]] = (
         "_k_scale",
         "_prob_scale",
@@ -326,6 +326,7 @@ class VLLMAttentionWrapper(Module):
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
+        vllm_attn_sharding_config: ShardingConfig
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -382,7 +383,7 @@ class VLLMAttentionWrapper(Module):
                 "head_size_v": value_head_dim,
                 "attn_backend": TorchTitanVarlenInnerAttentionDiffKVBackend,
             }
-        self.vllm_attn = Attention(
+        self.vllm_attn = _VLLMAttention(
             num_heads=num_heads,
             head_size=head_dim,
             scale=scale,
@@ -393,29 +394,7 @@ class VLLMAttentionWrapper(Module):
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
             **diff_kv_kwargs,
         )
-
-    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
-        super()._parallelize(parallelism_context)
-        assert self._sharding_config is not None
-
-        # vllm_attn is exempt from the Module protocol, so annotate its state
-        # from the dotted declarations added by _replace_vllm_layer_configs
-        for buffer_name in self.vllm_attn_scale_buffer_names:
-            state_name = f"vllm_attn.{buffer_name}"
-            layout = self._sharding_config.state_shardings.get(state_name)
-            if layout is None:
-                raise ValueError(
-                    f"{type(self).__name__}.{state_name} has no placement "
-                    "declared in sharding_config.state_shardings."
-                )
-            mesh = parallelism_context.get_optional_mesh(
-                [axis.value for axis in spmd_axes(layout)],
-                include_singleton_axes=True,
-            )
-            assert mesh is not None
-            buffer = getattr(self.vllm_attn, buffer_name)
-            with set_current_spmd_mesh(mesh):
-                spmd.assert_type(buffer, layout)
+        self.vllm_attn._sharding_config = config.vllm_attn_sharding_config
 
     def forward(
         self,

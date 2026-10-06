@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, ClassVar
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -52,7 +52,6 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
-    _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
@@ -274,8 +273,6 @@ class Module(nn.Module, Configurable):
             if isinstance(child, Module):
                 child._parallelize(parallelism_context)
             else:
-                if child_name in self._module_protocol_exempt_children:
-                    continue
                 if (
                     next(child.parameters(recurse=False), None) is not None
                     or next(child.buffers(recurse=False), None) is not None

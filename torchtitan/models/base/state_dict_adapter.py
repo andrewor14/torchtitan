@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+import itertools
 import json
 
 import logging
@@ -308,6 +309,7 @@ class StateDictAdapter(BaseStateDictAdapter):
                 tensors for HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
+        from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
         from torchtitan.models.common.feed_forward import FeedForward
         from torchtitan.models.common.moe import RoutedExperts
 
@@ -335,9 +337,11 @@ class StateDictAdapter(BaseStateDictAdapter):
             )
 
         if split_routed_experts:
-            for fqn, _config, _parent, _ in self.model_config.traverse(
-                RoutedExperts.Config
-            ):
+            expert_configs = itertools.chain(
+                self.model_config.traverse(RoutedExperts.Config),
+                self.model_config.traverse(DistMoeRoutedExperts.Config),
+            )
+            for fqn, _config, _parent, _ in expert_configs:
                 prefix = f"{fqn}." if fqn else ""
                 self._split_stacked_linear(
                     result,
@@ -365,6 +369,7 @@ class StateDictAdapter(BaseStateDictAdapter):
                 HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
+        from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
         from torchtitan.models.common.feed_forward import FeedForward
         from torchtitan.models.common.moe import RoutedExperts
 
@@ -392,9 +397,11 @@ class StateDictAdapter(BaseStateDictAdapter):
             )
 
         if fuse_routed_experts:
-            for fqn, _config, _parent, _ in self.model_config.traverse(
-                RoutedExperts.Config
-            ):
+            expert_configs = itertools.chain(
+                self.model_config.traverse(RoutedExperts.Config),
+                self.model_config.traverse(DistMoeRoutedExperts.Config),
+            )
+            for fqn, _config, _parent, _ in expert_configs:
                 prefix = f"{fqn}." if fqn else ""
                 self._stack_logical_linears(
                     result,

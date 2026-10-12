@@ -4,10 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Overlap the trainer->generator weight handoff with the next training step.
-
-See ``WEIGHT_SYNC.md`` for the end-to-end ordering and concurrency model.
-"""
+"""Overlap the trainer->generator weight handoff with the next training step."""
 
 from __future__ import annotations
 

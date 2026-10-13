@@ -4,9 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Verified single-node Qwen3-4B-Base DAPO-Math recipes."""
+"""Single-node DAPO-Math recipes: verified Qwen3-4B-Base and Qwen3-30B-A3B scale-up."""
 
 from __future__ import annotations
+
+from typing import Literal
 
 from renderers import Qwen3RendererConfig
 
@@ -21,8 +23,11 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadFP32OutputConverter
+from torchtitan.config.transform import apply_transforms, LMHeadFP32OutputConverter
+from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
@@ -195,4 +200,166 @@ def rl_dapo_qwen3_4b_math_32k() -> Controller.Config:
         max_response_tokens=32768,
         max_total_tokens=34816,
         dump_folder="outputs/rl/qwen3_4b_dapo_math_32k",
+    )
+
+
+def _qwen3_30b_a3b_dapo_math_config(
+    *,
+    max_response_tokens: int,
+    max_total_tokens: int,
+    num_prompts_per_train_step: int,
+    num_samples_per_prompt: int,
+    num_training_steps: int,
+    expert_precision: Literal["bf16", "mxfp8"],
+    dump_folder: str,
+) -> Controller.Config:
+    """Build the shared Qwen3-30B-A3B-Base DAPO-Math configuration with Dist-MoE experts.
+
+    One node: trainer FSDP4 / EP4 on 4 GPUs and one generator TP4 / EP4 on 4 GPUs
+    (generator DP1, so the generator's FSDP degree is 1).
+    """
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=4,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=4,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
+        "30B-A3B",
+        seq_len=max_total_tokens,
+        attn_backend="varlen",
+        # Compute vocabulary logits in fp32; the rest of the forward uses bf16.
+        converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    config = Controller.Config(
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B-Base",
+        dump_folder=dump_folder,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=num_training_steps,
+            num_prompts_per_train_step=num_prompts_per_train_step,
+            num_samples_per_prompt=num_samples_per_prompt,
+            target_offpolicy_steps=4,
+            validation=ValidationConfig(steps=30),
+        ),
+        rollouter=_dapo_math_rollouter_config(
+            validation_dataset=AIME2025Dataset.Config(),
+            token_env=TokenEnv.Config(
+                max_rollout_tokens=max_total_tokens,
+                max_num_turns=1,
+            ),
+        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
+        num_generators=1,
+        metrics=MetricsProcessor.Config(
+            enable_wandb=True,
+            console_log_keys_validation=[
+                "validation_reward/_mean",
+                "validation_reward/_max",
+                "validation/response_length/mean",
+                "timing/validate",
+            ],
+        ),
+        trainer=Trainer.Config(
+            model=trainer_model,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*",
+                            lr=5e-6,
+                            betas=(0.9, 0.98),
+                            weight_decay=0.1,
+                        )
+                    ]
+                ),
+                # A minimum factor of 1 keeps the learning rate constant.
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=10,
+                    min_lr_factor=1.0,
+                ),
+            ),
+            training=TrainingConfig(
+                disable_cuda_graphs=True,
+                # Pack several rollouts per microbatch (a multiple of
+                # max_total_tokens).
+                num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
+                max_context_length=max_total_tokens,
+                dtype="bfloat16",
+            ),
+            # Full activation checkpointing would replay dist_moe's forward in
+            # backward and corrupt its activation planner; RegionAC with no saved
+            # regions does not.
+            activation_checkpoint=RegionAC.Config(save_regions=[]),
+            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
+            parallelism=trainer_parallelism,
+            checkpointer=CheckpointManager.Config(
+                initial_load_in_hf=True,
+                interval=100,
+                last_save_model_only=False,
+                keep_latest_k=3,
+            ),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=DAPOLoss.Config(
+                    ratio_clip_low=0.2,
+                    ratio_clip_high=0.28,
+                    global_vocab_size=decoder_vocab_size(trainer_model),
+                ),
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model=generator_model,
+            model_dtype="bfloat16",
+            parallelism=generator_parallelism,
+            # Unlike the stock MoE dispatch, Dist-MoE can be captured in CUDA graphs.
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            dist_moe_runtime=DistMoeRuntime.Config(
+                scratch_capacity_factor=4.0, inference=True
+            ),
+            max_num_batched_tokens=8192,
+            checkpointer=None,
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=1.0,
+                max_tokens=max_response_tokens,
+            ),
+        ),
+    )
+    transform = DistMoeTransform(expert_precision=expert_precision)
+    config.trainer = apply_transforms(config.trainer, [transform])
+    config.generator = apply_transforms(config.generator, [transform])
+    return config
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_large() -> Controller.Config:
+    """Qwen3-30B-A3B-Base, 8K responses, 128 prompts x 16 samples per step, BF16 Dist-MoE experts."""
+    return _qwen3_30b_a3b_dapo_math_config(
+        max_response_tokens=8192,
+        max_total_tokens=10240,
+        num_prompts_per_train_step=128,
+        num_samples_per_prompt=16,
+        num_training_steps=100,
+        expert_precision="bf16",
+        dump_folder="outputs/rl/qwen3_30b_a3b_dapo_math_8k_large",
+    )
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_large_mxfp8() -> Controller.Config:
+    """Qwen3-30B-A3B-Base 8K large DAPO-Math with MXFP8 Dist-MoE experts."""
+    return _qwen3_30b_a3b_dapo_math_config(
+        max_response_tokens=8192,
+        max_total_tokens=10240,
+        num_prompts_per_train_step=128,
+        num_samples_per_prompt=16,
+        num_training_steps=100,
+        expert_precision="mxfp8",
+        dump_folder="outputs/rl/qwen3_30b_a3b_dapo_math_8k_large_mxfp8",
     )

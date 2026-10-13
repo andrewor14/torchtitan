@@ -584,7 +584,7 @@ class Controller(Configurable):
         # upper bound on concurrently scheduled sequences. vLLM may admit fewer if KV
         # is tight; this also sets CUDA-graph capture sizes.
         max_num_seqs = min(
-            math.ceil(rollout_concurrency / num_generator_dp_shards), 512
+            math.ceil(rollout_concurrency / num_generator_dp_shards), 8192
         )
 
         logger.info(

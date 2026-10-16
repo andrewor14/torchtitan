@@ -27,7 +27,7 @@ from torchtitan.config.transform import apply_transforms, LMHeadFP32OutputConver
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.dist_moe import _dist_moe as dist_moe, DistMoeRuntime
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
@@ -333,9 +333,21 @@ def _qwen3_30b_a3b_dapo_math_config(
             ),
         ),
     )
-    transform = DistMoeTransform(expert_precision=expert_precision)
-    config.trainer = apply_transforms(config.trainer, [transform])
-    config.generator = apply_transforms(config.generator, [transform])
+    config.trainer = apply_transforms(
+        config.trainer, [DistMoeTransform(expert_precision=expert_precision)]
+    )
+    # MXFP8 generator experts use the Mega pipeline with fused-SwiGLU inference
+    # weights; the trainer keeps the staged training layout.
+    generator_transform = (
+        DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
+            inference=True,
+        )
+        if expert_precision == "mxfp8"
+        else DistMoeTransform(expert_precision=expert_precision)
+    )
+    config.generator = apply_transforms(config.generator, [generator_transform])
     return config
 
 

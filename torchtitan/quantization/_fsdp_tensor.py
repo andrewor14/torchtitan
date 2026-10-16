@@ -324,14 +324,17 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         if not preserve_wrapper:
             return output
         assert template is not None
-        wrapper_type = type(template)
 
         def wrap(tensor: torch.Tensor):
             # Ensure the wrapper and inner tensor use the same inference mode
             with torch.inference_mode(tensor.is_inference()):
-                return wrapper_type(tensor)
+                return template._rewrap(tensor)
 
         return pytree.tree_map_only(torch.Tensor, wrap, output)
+
+    def _rewrap(self, tensor: torch.Tensor) -> _ShardedFSDPTensor:
+        """Wrap an FSDP-sharded ``tensor`` like this parameter."""
+        return type(self)(tensor)
 
     def _build_operands(
         self,

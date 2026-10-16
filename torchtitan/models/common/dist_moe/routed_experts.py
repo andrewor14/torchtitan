@@ -119,6 +119,7 @@ class DistMoeRoutedExperts(Module):
         self.inplace_wgrad_accum = config.inplace_wgrad_accum
         self.bf16_grouped_gemm_preset = config.bf16_grouped_gemm_preset
         self.block_scaled_config: dist_moe.BlockScaledConfig | None = None
+        self.inference = False
         self.activation = config.activation
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_limit = config.swiglu_limit

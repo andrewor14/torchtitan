@@ -431,6 +431,11 @@ class DistMoeRuntime(Configurable):
         wgrad_dtype: torch.dtype | None = None,
     ) -> dist_moe.Config:
         """Build the annex context configuration for one local expert module."""
+        if module.inference and not self.config.inference:
+            raise ValueError(
+                "Dist-MoE inference weights are forward-only and require "
+                "DistMoeRuntime.Config(inference=True)"
+            )
         vmm = (
             None
             if self.config.vmm_capacity_factor is None
